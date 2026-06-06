@@ -1,0 +1,63 @@
+[package]
+name = "fox-cull"
+version = "0.1.0"
+description = "Lightweight cross-platform photo/video culling tool"
+authors = ["fox-cull contributors"]
+edition = "2021"
+
+[lib]
+name = "fox_cull_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `protocol-asset` lets us serve cached thumbnails + originals to the webview
+# via convertFileSrc; `devtools` keeps F12 inspect available in release.
+tauri = { version = "2", features = ["protocol-asset", "devtools"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+tauri-plugin-opener = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Culling catalog (ratings/labels/reject flags). Bundled SQLite — no system dep.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Thumbnail decode/resize/encode. Default features cover jpeg/png/tiff/webp.
+image = "0.25"
+# EXIF orientation (works on JPEG and TIFF-based RAW like NEF).
+kamadak-exif = "0.5"
+# Move rejected files to the OS Recycle Bin / Trash instead of hard-deleting.
+trash = "5"
+
+parking_lot = "0.12"
+
+[target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
+tauri-plugin-single-instance = "2"
+
+[profile.release]
+# thin LTO + codegen-units=16: full LTO OOMs rustc on the dev host (see the
+# workspace CLAUDE.md). Don't tighten without confirming 16+ GB RAM.
+panic = "abort"
+codegen-units = 16
+lto = "thin"
+opt-level = "s"
+strip = true
+
+# `tauri dev` builds Rust unoptimized, which makes image decode/resize 30-50x
+# slower (~5.7s per 12MP thumbnail observed). Optimize ONLY the image-decoding
+# crates in dev so thumbnails are fast while our own code stays debuggable.
+# Targeted (not "*") to avoid recompiling the heavy SQLite/Tauri C builds.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.zune-core]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.exr]
+opt-level = 3

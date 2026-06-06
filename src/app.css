@@ -1,0 +1,81 @@
+/* fox-cull — dark, photo-first culling UI.
+   The whole app is built for staring at images, so chrome is muted and
+   the viewport is given to the photo. Tokens below; components reference vars. */
+:root {
+  --bg: #14110d;            /* near-black warm */
+  --bg-panel: #1d1812;      /* side panels */
+  --bg-elev: #272018;       /* cards, filmstrip */
+  --bg-hover: #332a20;
+  --border: #3a2f24;
+  --text: #f3ece1;
+  --text-dim: #b6a892;
+  --text-faint: #7d7060;
+  --accent: #ec7c34;        /* fox orange */
+  --accent-dim: #a6571f;
+  --reject: #e0533d;
+  --pick: #5bbf6a;
+  --star: #f3c14b;
+
+  /* color labels (8/9/0 etc.) */
+  --label-red: #e0533d;
+  --label-green: #5bbf6a;
+  --label-yellow: #f3c14b;
+  --label-blue: #4d97e0;
+  --label-purple: #9b6fe0;
+
+  --filmstrip-h: 124px;
+  --tree-w: 270px;
+  --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 7px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+  transition: background 0.12s, border-color 0.12s;
+}
+.btn:hover { background: var(--bg-hover); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.accent { background: var(--accent-dim); border-color: var(--accent); }
+.btn.accent:hover { background: var(--accent); }
+.btn.danger { color: var(--reject); border-color: var(--reject); }
+
+.banner {
+  padding: 8px 14px;
+  background: #3a2a1a;
+  border-bottom: 1px solid var(--accent-dim);
+  color: var(--text-dim);
+  font-size: 12.5px;
+}

@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# build output
+/build/
+/.svelte-kit/
+/package/
+
+# tauri
+/src-tauri/target/
+/src-tauri/gen/
+
+# env / editor
+.DS_Store
+*.local
+.vscode/*
+!.vscode/extensions.json

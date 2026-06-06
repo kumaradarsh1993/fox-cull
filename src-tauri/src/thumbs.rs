@@ -1,0 +1,96 @@
+//! Orientation-baked, disk-cached thumbnails (and larger loupe previews).
+//!
+//! Cache filename is a hash of (abs path, mtime, size, max-edge, orientation),
+//! so editing/replacing a file or asking for a different size produces a fresh
+//! entry and stale ones are simply never referenced again.
+
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use image::DynamicImage;
+
+use crate::media::{self, Kind};
+
+fn cache_key(abs: &str, mtime: i64, size: u64, max: u32, orientation: u16) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    abs.hash(&mut h);
+    mtime.hash(&mut h);
+    size.hash(&mut h);
+    max.hash(&mut h);
+    orientation.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// Bake the EXIF orientation into the pixels so the output is always upright —
+/// this is the fix for "portrait phone photos showing up sideways".
+fn apply_orientation(img: DynamicImage, o: u16) -> DynamicImage {
+    match o {
+        2 => img.fliph(),
+        3 => img.rotate180(),
+        4 => img.flipv(),
+        5 => img.rotate90().fliph(),
+        6 => img.rotate90(),
+        7 => img.rotate270().fliph(),
+        8 => img.rotate270(),
+        _ => img,
+    }
+}
+
+fn load_source(path: &Path, kind: Kind) -> Result<DynamicImage, String> {
+    match kind {
+        // RAW: pull the embedded full-res JPEG preview rather than demosaic.
+        Kind::Raw => {
+            let data = std::fs::read(path).map_err(|e| e.to_string())?;
+            let jpg = media::largest_embedded_jpeg(&data)
+                .ok_or_else(|| "no embedded JPEG preview found in RAW file".to_string())?;
+            image::load_from_memory(jpg).map_err(|e| e.to_string())
+        }
+        _ => image::open(path).map_err(|e| e.to_string()),
+    }
+}
+
+/// Ensure a cached, orientation-corrected JPEG (long edge <= `max`) exists for
+/// `path`; returns the cache file path. Idempotent — returns immediately if the
+/// keyed file already exists.
+pub fn ensure(cache_dir: &Path, path: &Path, kind: Kind, max: u32) -> Result<PathBuf, String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let abs = path.to_string_lossy().to_string();
+    let o = media::orientation(path);
+    let out = cache_dir.join(format!("{}.jpg", cache_key(&abs, mtime, meta.len(), max, o)));
+    if out.exists() {
+        return Ok(out);
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let t0 = Instant::now();
+    let img = load_source(path, kind)?;
+    let (sw, sh) = (img.width(), img.height());
+    let decode_ms = t0.elapsed().as_millis();
+    let t1 = Instant::now();
+    // Downscale FIRST, then bake orientation into the small image — rotating a
+    // full 12MP buffer before downscaling was a big chunk of the resize cost.
+    let img = img.thumbnail(max, max); // preserves aspect, fits within max x max
+    let img = apply_orientation(img, o);
+    // JPEG has no alpha channel; flatten to RGB before encoding.
+    let rgb = DynamicImage::ImageRgb8(img.to_rgb8());
+    rgb.save(&out).map_err(|e| e.to_string())?;
+    crate::log::line(&format!(
+        "THUMB-GEN {} {}x{} max={} decode={}ms resize+enc={}ms",
+        name,
+        sw,
+        sh,
+        max,
+        decode_ms,
+        t1.elapsed().as_millis()
+    ));
+    Ok(out)
+}

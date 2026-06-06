@@ -1,0 +1,40 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#241c14"/>
+      <stop offset="1" stop-color="#120f0b"/>
+    </linearGradient>
+    <linearGradient id="fox" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f59140"/>
+      <stop offset="1" stop-color="#d9641c"/>
+    </linearGradient>
+  </defs>
+
+  <!-- app tile -->
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!-- fox ears -->
+  <path d="M150 196 L196 96 L242 188 Z" fill="url(#fox)"/>
+  <path d="M362 196 L316 96 L270 188 Z" fill="url(#fox)"/>
+  <path d="M171 178 L197 122 L223 174 Z" fill="#2b2218"/>
+  <path d="M341 178 L315 122 L289 174 Z" fill="#2b2218"/>
+
+  <!-- fox face / camera body -->
+  <circle cx="256" cy="292" r="150" fill="url(#fox)"/>
+
+  <!-- eyes -->
+  <circle cx="210" cy="250" r="11" fill="#2b2218"/>
+  <circle cx="302" cy="250" r="11" fill="#2b2218"/>
+
+  <!-- camera aperture as the snout/nose -->
+  <g stroke="#1a140d" stroke-width="9" stroke-linecap="round">
+    <line x1="296" y1="300" x2="320" y2="300"/>
+    <line x1="276" y1="335" x2="288" y2="355"/>
+    <line x1="236" y1="335" x2="224" y2="355"/>
+    <line x1="216" y1="300" x2="192" y2="300"/>
+    <line x1="236" y1="265" x2="224" y2="245"/>
+    <line x1="276" y1="265" x2="288" y2="245"/>
+  </g>
+  <polygon points="296,300 276,335 236,335 216,300 236,265 276,265" fill="#16110b"/>
+  <circle cx="256" cy="300" r="13" fill="#f7b46a"/>
+</svg>
