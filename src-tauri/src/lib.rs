@@ -56,6 +56,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::set_library_root,
+            commands::list_drives,
             commands::list_tree,
             commands::list_folder_media,
             commands::thumbnail,
@@ -67,7 +68,7 @@ pub fn run() {
             commands::set_label_many,
             commands::set_flag_many,
             commands::list_rejected,
-            commands::delete_to_trash,
+            commands::dispose_rejected,
             commands::folder_writable,
             commands::log_event,
         ])

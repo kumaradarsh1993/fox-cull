@@ -1,31 +1,57 @@
-/* fox-cull — dark, photo-first culling UI.
-   The whole app is built for staring at images, so chrome is muted and
-   the viewport is given to the photo. Tokens below; components reference vars. */
-:root {
-  --bg: #14110d;            /* near-black warm */
-  --bg-panel: #1d1812;      /* side panels */
-  --bg-elev: #272018;       /* cards, filmstrip */
+/* fox-cull theming. Light is the default (Google-Photos-sober); dark is opt-in.
+   Components reference the tokens below, so theming is just a palette swap. */
+:root,
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-panel: #f6f8fa; /* side panels / bars */
+  --bg-elev: #ffffff; /* cards, popovers */
+  --bg-hover: #eceff1;
+  --viewport-bg: #e9ebee; /* neutral gray behind photos, like Google Photos */
+  --border: #dce0e3;
+  --text: #1f2329;
+  --text-dim: #5f6368;
+  --text-faint: #9aa0a6;
+  --accent: #e8702a; /* fox orange */
+  --accent-dim: #fbe6d8; /* light orange fill for active chips */
+  --accent-on: #ffffff;
+  --reject: #d93838;
+  --pick: #2e9e4f;
+  --star: #e8a417;
+  --shadow: 0 4px 18px rgba(0, 0, 0, 0.14);
+
+  --label-red: #d93838;
+  --label-green: #2e9e4f;
+  --label-yellow: #e8b417;
+  --label-blue: #2f7de0;
+  --label-purple: #8a5be0;
+
+  --tree-w: 270px;
+  --font: "Inter", "Roboto", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+:root[data-theme="dark"] {
+  --bg: #14110d;
+  --bg-panel: #1d1812;
+  --bg-elev: #272018;
   --bg-hover: #332a20;
+  --viewport-bg: #0a0805;
   --border: #3a2f24;
   --text: #f3ece1;
   --text-dim: #b6a892;
   --text-faint: #7d7060;
-  --accent: #ec7c34;        /* fox orange */
-  --accent-dim: #a6571f;
+  --accent: #ec7c34;
+  --accent-dim: #7a3f16;
+  --accent-on: #ffffff;
   --reject: #e0533d;
   --pick: #5bbf6a;
   --star: #f3c14b;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
 
-  /* color labels (8/9/0 etc.) */
   --label-red: #e0533d;
   --label-green: #5bbf6a;
   --label-yellow: #f3c14b;
   --label-blue: #4d97e0;
   --label-purple: #9b6fe0;
-
-  --filmstrip-h: 124px;
-  --tree-w: 270px;
-  --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -36,22 +62,17 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
-  font-size: 14px;
+  font-size: 13.5px;
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
 }
 
-button {
-  font-family: inherit;
-  color: inherit;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-}
+button { font-family: inherit; color: inherit; background: transparent; border: none; cursor: pointer; }
 
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--text-faint) 45%, transparent); border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--text-faint) 70%, transparent); }
 ::-webkit-scrollbar-track { background: transparent; }
 
 .btn {
@@ -59,23 +80,25 @@ button {
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   color: var(--text);
   font-size: 13px;
   transition: background 0.12s, border-color 0.12s;
+  white-space: nowrap;
 }
 .btn:hover { background: var(--bg-hover); }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn.accent { background: var(--accent-dim); border-color: var(--accent); }
-.btn.accent:hover { background: var(--accent); }
-.btn.danger { color: var(--reject); border-color: var(--reject); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.accent { background: var(--accent); border-color: var(--accent); color: var(--accent-on); }
+.btn.accent:hover { filter: brightness(1.05); }
+.btn.danger { color: var(--reject); border-color: color-mix(in srgb, var(--reject) 50%, var(--border)); }
+.btn.on { border-color: var(--accent); color: var(--accent); }
 
 .banner {
-  padding: 8px 14px;
-  background: #3a2a1a;
-  border-bottom: 1px solid var(--accent-dim);
+  padding: 7px 14px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-panel));
+  border-bottom: 1px solid var(--border);
   color: var(--text-dim);
   font-size: 12.5px;
 }

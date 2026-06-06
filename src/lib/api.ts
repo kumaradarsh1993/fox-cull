@@ -4,6 +4,7 @@ import type { TreeDir, MediaItem, TrashOutcome } from "./types";
 
 export const api = {
   setLibraryRoot: (root: string) => invoke<void>("set_library_root", { root }),
+  listDrives: () => invoke<TreeDir[]>("list_drives"),
   listTree: (dir: string) => invoke<TreeDir[]>("list_tree", { dir }),
   listFolderMedia: (dir: string, recursive: boolean) =>
     invoke<MediaItem[]>("list_folder_media", { dir, recursive }),
@@ -23,8 +24,8 @@ export const api = {
   setFlagMany: (paths: string[], flag: string | null) =>
     invoke<void>("set_flag_many", { paths, flag }),
   listRejected: () => invoke<string[]>("list_rejected"),
-  deleteToTrash: (paths: string[]) =>
-    invoke<TrashOutcome>("delete_to_trash", { paths }),
+  disposeRejected: (paths: string[], mode: string, dest: string | null) =>
+    invoke<TrashOutcome>("dispose_rejected", { paths, mode, dest }),
   folderWritable: (dir: string) => invoke<boolean>("folder_writable", { dir }),
   logEvent: (msg: string) => invoke<void>("log_event", { msg }).catch(() => {}),
 

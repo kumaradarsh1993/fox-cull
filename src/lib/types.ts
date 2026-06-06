@@ -10,6 +10,7 @@ export interface MediaItem {
   rel: string;
   kind: "image" | "raw" | "video" | "other";
   ext: string;
+  mtime: number;
   rating: number;
   label: string | null;
   flag: "pick" | "reject" | null;

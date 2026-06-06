@@ -1,16 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "$lib/api";
+  import { settings } from "$lib/settings.svelte";
   import { resetThumbs } from "$lib/thumbnail-loader";
-  import { getLastRoot, setLastRoot } from "$lib/persist";
   import {
     LABELS,
     LABEL_BY_DIGIT,
     LABEL_VAR,
     type MediaItem,
     type TreeDir,
-    type Filter,
-    type TrashOutcome,
   } from "$lib/types";
   import TreeNode from "$lib/components/TreeNode.svelte";
   import Thumb from "$lib/components/Thumb.svelte";
@@ -18,76 +16,78 @@
   import VirtualGrid from "$lib/components/VirtualGrid.svelte";
   import VirtualStrip from "$lib/components/VirtualStrip.svelte";
 
-  let root = $state<string | null>(null);
-  let rootNode = $state<TreeDir | null>(null);
+  type FlagFilter = "all" | "pick" | "reject" | "unflagged";
+
+  let drives = $state<TreeDir[]>([]);
   let currentDir = $state<string | null>(null);
   let items = $state<MediaItem[]>([]);
   let loading = $state(false);
   let writable = $state(true);
-  let includeSub = $state(true);
 
   let mode = $state<"grid" | "loupe">("grid");
   let activeIndex = $state(0);
   let selected = $state<Set<string>>(new Set());
 
-  let filter = $state<Filter>({ minRating: 0, label: null, flag: null });
+  let minRating = $state(0);
+  let labelFilter = $state<string | null>(null);
+  let flagFilter = $state<FlagFilter>("all");
 
+  let dimLevel = $state(0); // 0 normal · 1 dim chrome · 2 lights out
+  let settingsOpen = $state(false);
   let gridComp = $state<{ scrollToIndex: (i: number) => void } | null>(null);
 
-  let sweep = $state<{ open: boolean; paths: string[]; result: TrashOutcome | null }>({
-    open: false,
-    paths: [],
-    result: null,
-  });
-  let toast = $state<string | null>(null);
+  const HOLD_MS = 850;
+  let holdMs = $state(0);
+  let holdRAF = 0;
 
   const basename = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
 
-  let filtered = $derived(
-    items.filter((it) => {
-      if (filter.minRating > 0 && it.rating < filter.minRating) return false;
-      if (filter.label && it.label !== filter.label) return false;
-      if (filter.flag === "reject" && it.flag !== "reject") return false;
-      if (filter.flag === "pick" && it.flag !== "pick") return false;
-      if (filter.flag === "unflagged" && it.flag) return false;
-      return true;
-    }),
-  );
+  // type → rating/label/flag filters → sort, in one pass.
+  let view = $derived.by(() => {
+    let arr = items;
+    const tf = settings.s.typeFilter;
+    if (tf !== "all") arr = arr.filter((i) => i.kind === tf);
+    if (minRating > 0) arr = arr.filter((i) => i.rating >= minRating);
+    if (labelFilter) arr = arr.filter((i) => i.label === labelFilter);
+    if (flagFilter === "reject") arr = arr.filter((i) => i.flag === "reject");
+    else if (flagFilter === "pick") arr = arr.filter((i) => i.flag === "pick");
+    else if (flagFilter === "unflagged") arr = arr.filter((i) => !i.flag);
 
-  let active = $derived(
-    filtered.length ? filtered[Math.min(activeIndex, filtered.length - 1)] : null,
-  );
+    const dir = settings.s.sortDir === "asc" ? 1 : -1;
+    const by = settings.s.sortBy;
+    return [...arr].sort((a, b) => {
+      let c = 0;
+      if (by === "date") c = a.mtime - b.mtime;
+      else if (by === "type") c = a.kind.localeCompare(b.kind);
+      if (c === 0) c = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+      return c * dir;
+    });
+  });
+
+  let active = $derived(view.length ? view[Math.min(activeIndex, view.length - 1)] : null);
   let rejectedCount = $derived(items.filter((i) => i.flag === "reject").length);
   let pickCount = $derived(items.filter((i) => i.flag === "pick").length);
+  let stripCell = $derived(Math.max(64, settings.s.filmstripSize - 24));
 
   $effect(() => {
-    if (activeIndex > filtered.length - 1) activeIndex = Math.max(0, filtered.length - 1);
+    if (activeIndex > view.length - 1) activeIndex = Math.max(0, view.length - 1);
   });
 
   onMount(async () => {
-    const last = await getLastRoot();
-    if (last) await applyRoot(last);
+    await settings.init();
+    try {
+      drives = await api.listDrives();
+    } catch {
+      drives = [];
+    }
+    if (settings.s.lastDir) openFolder(settings.s.lastDir);
   });
 
-  async function chooseRoot() {
-    const picked = await api.pickFolder();
-    if (picked) {
-      await applyRoot(picked);
-      await setLastRoot(picked);
-    }
-  }
-
-  async function applyRoot(r: string) {
-    try {
-      await api.setLibraryRoot(r);
-    } catch (e) {
-      toast = `Couldn't open that folder: ${e}`;
-      return;
-    }
-    root = r;
-    rootNode = { name: basename(r), path: r, has_children: true };
-    currentDir = null;
-    items = [];
+  function rootForDir(dir: string): string {
+    const d = drives.find((dr) => dir.toLowerCase().startsWith(dr.path.toLowerCase()));
+    if (d) return d.path;
+    const m = dir.match(/^[A-Za-z]:[\\/]/);
+    return m ? m[0] : dir;
   }
 
   async function openFolder(dir: string) {
@@ -95,30 +95,37 @@
     loading = true;
     resetThumbs();
     selected = new Set();
-    const t0 = performance.now();
     try {
-      items = await api.listFolderMedia(dir, includeSub);
+      await api.setLibraryRoot(rootForDir(dir));
+      items = await api.listFolderMedia(dir, settings.s.includeSub);
       writable = await api.folderWritable(dir);
     } catch (e) {
       items = [];
-      toast = `Failed to read folder: ${e}`;
+      console.error(e);
     }
-    const ms = Math.round(performance.now() - t0);
-    api.logEvent(`folder-open ${basename(dir)} recursive=${includeSub} items=${items.length} roundtrip=${ms}ms`);
     activeIndex = 0;
-    if (filtered.length) selected = new Set([filtered[0].path]);
+    if (view.length) selected = new Set([view[0].path]);
     loading = false;
-    // Mark when the webview has painted the first frame after data arrived —
-    // the gap between roundtrip and this reveals client-side render cost.
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() =>
-        api.logEvent(`grid-painted ${basename(dir)} +${Math.round(performance.now() - t0)}ms total`),
-      ),
-    );
+    settings.set({ lastDir: dir });
+  }
+
+  async function openFolderPicker() {
+    const picked = await api.pickFolder();
+    if (picked) {
+      // ensure the drive shows in the tree
+      if (!drives.length) {
+        try {
+          drives = await api.listDrives();
+        } catch {
+          /* */
+        }
+      }
+      openFolder(picked);
+    }
   }
 
   async function toggleSub() {
-    includeSub = !includeSub;
+    await settings.set({ includeSub: !settings.s.includeSub });
     if (currentDir) await openFolder(currentDir);
   }
 
@@ -132,8 +139,8 @@
   }
 
   function setActiveTo(i: number) {
-    activeIndex = Math.max(0, Math.min(i, filtered.length - 1));
-    const a = filtered[activeIndex];
+    activeIndex = Math.max(0, Math.min(i, view.length - 1));
+    const a = view[activeIndex];
     if (a) selected = new Set([a.path]);
     scrollActive();
   }
@@ -142,44 +149,38 @@
     setActiveTo(activeIndex + delta);
   }
 
-  // For a single target we TOGGLE; for a multi-selection we SET (intent of
-  // pressing X on 500 selected photos is "reject them all", not toggle each).
+  // Single target toggles; multi-selection sets (the intent of X on 500 photos
+  // is "reject them all", not toggle each).
   function rate(r: number) {
     const ts = targets();
     if (ts.length === 1) {
-      const it = ts[0];
-      it.rating = it.rating === r ? 0 : r;
-      api.setRating(it.path, it.rating).catch(() => {});
+      ts[0].rating = ts[0].rating === r ? 0 : r;
+      api.setRating(ts[0].path, ts[0].rating).catch(() => {});
     } else if (ts.length > 1) {
       for (const it of ts) it.rating = r;
       api.setRatingMany(ts.map((i) => i.path), r).catch(() => {});
     }
   }
-
   function label(key: string) {
     const ts = targets();
     if (ts.length === 1) {
-      const it = ts[0];
-      it.label = it.label === key ? null : key;
-      api.setLabel(it.path, it.label).catch(() => {});
+      ts[0].label = ts[0].label === key ? null : key;
+      api.setLabel(ts[0].path, ts[0].label).catch(() => {});
     } else if (ts.length > 1) {
       for (const it of ts) it.label = key;
       api.setLabelMany(ts.map((i) => i.path), key).catch(() => {});
     }
   }
-
   function flag(f: "pick" | "reject") {
     const ts = targets();
     if (ts.length === 1) {
-      const it = ts[0];
-      it.flag = it.flag === f ? null : f;
-      api.setFlag(it.path, it.flag).catch(() => {});
+      ts[0].flag = ts[0].flag === f ? null : f;
+      api.setFlag(ts[0].path, ts[0].flag).catch(() => {});
     } else if (ts.length > 1) {
       for (const it of ts) it.flag = f;
       api.setFlagMany(ts.map((i) => i.path), f).catch(() => {});
     }
   }
-
   function unset() {
     const ts = targets();
     if (!ts.length) return;
@@ -201,9 +202,8 @@
   }
 
   function selectAllFiltered() {
-    selected = new Set(filtered.map((i) => i.path));
+    selected = new Set(view.map((i) => i.path));
   }
-
   function rejectSelected() {
     const sel = items.filter((i) => selected.has(i.path));
     if (!sel.length) return;
@@ -212,7 +212,7 @@
   }
 
   function gridCellClick(e: MouseEvent, i: number) {
-    const it = filtered[i];
+    const it = view[i];
     if (!it) return;
     if (e.ctrlKey || e.metaKey) {
       const next = new Set(selected);
@@ -225,37 +225,96 @@
     }
   }
 
-  async function openSweep() {
+  // ── long-press delete (no modal, no toast) ──────────────────────────────
+  function startHold() {
+    if (rejectedCount === 0 || !writable) return;
+    const t0 = performance.now();
+    const tick = () => {
+      holdMs = performance.now() - t0;
+      if (holdMs >= HOLD_MS) {
+        holdMs = 0;
+        executeDelete();
+      } else {
+        holdRAF = requestAnimationFrame(tick);
+      }
+    };
+    holdRAF = requestAnimationFrame(tick);
+  }
+  function endHold() {
+    cancelAnimationFrame(holdRAF);
+    holdMs = 0;
+  }
+  async function executeDelete() {
     const paths = await api.listRejected();
-    sweep = { open: true, paths, result: null };
+    if (!paths.length) return;
+    let dest = settings.s.rejectFolder;
+    if (settings.s.deleteMode === "folder") {
+      if (!dest) {
+        dest = await api.pickFolder();
+        if (!dest) return;
+        await settings.set({ rejectFolder: dest });
+      }
+    }
+    await api.disposeRejected(paths, settings.s.deleteMode, settings.s.deleteMode === "folder" ? dest : null);
+    if (currentDir) await openFolder(currentDir); // silent refresh
   }
 
-  async function confirmSweep() {
-    const result = await api.deleteToTrash(sweep.paths);
-    sweep = { ...sweep, result };
-    if (currentDir) await openFolder(currentDir);
-    toast =
-      `Moved ${result.deleted} file(s) to the Recycle Bin/Trash` +
-      (result.failed.length ? ` · ${result.failed.length} failed` : "");
+  // ── panel resizing ──────────────────────────────────────────────────────
+  function startTreeResize(e: PointerEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = settings.s.treeWidth;
+    const move = (ev: PointerEvent) => {
+      settings.s.treeWidth = Math.max(170, Math.min(560, startW + (ev.clientX - startX)));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      settings.set({ treeWidth: settings.s.treeWidth });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+  function startStripResize(e: PointerEvent) {
+    e.preventDefault();
+    const right = settings.s.filmstripPos === "right";
+    const start = right ? e.clientX : e.clientY;
+    const startS = settings.s.filmstripSize;
+    const move = (ev: PointerEvent) => {
+      const d = right ? start - ev.clientX : start - ev.clientY;
+      settings.s.filmstripSize = Math.max(84, Math.min(460, startS + d));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      settings.set({ filmstripSize: settings.s.filmstripSize });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  async function chooseRejectFolder() {
+    const f = await api.pickFolder();
+    if (f) await settings.set({ rejectFolder: f });
   }
 
   function onkeydown(e: KeyboardEvent) {
     const t = e.target as HTMLElement;
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
-    if (!root) return;
-
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
     if (e.key === "ArrowRight" || e.key === "ArrowDown") { move(1); e.preventDefault(); return; }
     if (e.key === "ArrowLeft" || e.key === "ArrowUp") { move(-1); e.preventDefault(); return; }
     if (e.key === "Enter") { mode = mode === "grid" ? "loupe" : "grid"; e.preventDefault(); return; }
     if (e.key === "Escape") {
-      if (mode === "loupe") mode = "grid";
+      if (dimLevel > 0) dimLevel = 0;
+      else if (mode === "loupe") mode = "grid";
       else selected = active ? new Set([active.path]) : new Set();
       return;
     }
+    const k = e.key.toLowerCase();
+    if (k === "l") { dimLevel = (dimLevel + 1) % 3; return; }
     if (e.key >= "1" && e.key <= "5") { rate(Number(e.key)); return; }
     if (e.key === "`") { rate(0); return; }
     if (e.key in LABEL_BY_DIGIT) { label(LABEL_BY_DIGIT[e.key]); return; }
-    const k = e.key.toLowerCase();
     if (k === "x") { flag("reject"); return; }
     if (k === "p") { flag("pick"); return; }
     if (k === "u") { unset(); return; }
@@ -264,7 +323,6 @@
 
 <svelte:window {onkeydown} />
 
-<!-- grid cell -->
 {#snippet gridCell(item: MediaItem, i: number)}
   <button
     class="cell"
@@ -284,8 +342,7 @@
   </button>
 {/snippet}
 
-<!-- filmstrip cell -->
-{#snippet stripCell(item: MediaItem, i: number)}
+{#snippet stripCellSnip(item: MediaItem, i: number)}
   <button
     class="scell"
     class:active={i === activeIndex}
@@ -294,7 +351,6 @@
     ondblclick={() => { setActiveTo(i); mode = "loupe"; }}
     title={item.name}
   >
-    <!-- same size as the grid so the filmstrip reuses the cached decode (no 2nd decode) -->
     <Thumb {item} size={320} />
     {#if item.label}<span class="s-lbl" style="background:var({LABEL_VAR[item.label]})"></span>{/if}
     {#if item.rating > 0}<span class="s-stars">{"★".repeat(item.rating)}</span>{/if}
@@ -303,80 +359,166 @@
   </button>
 {/snippet}
 
-<div class="app">
-  <aside class="tree">
+<div class="app" data-dim={dimLevel}>
+  <!-- ░ left: drives + folder tree ░ -->
+  <aside class="tree" style="width:{settings.s.treeWidth}px">
     <div class="tree-head">
       <span class="brand">🦊 fox-cull</span>
-      <button class="btn" onclick={chooseRoot} title="Choose library folder">Folder…</button>
+      <button class="btn sm" onclick={openFolderPicker} title="Jump to a folder">Open…</button>
     </div>
     <div class="tree-body">
-      {#if rootNode}
-        <TreeNode node={rootNode} {currentDir} onselect={openFolder} />
+      {#if drives.length}
+        {#each drives as d (d.path)}
+          <TreeNode node={d} {currentDir} onselect={openFolder} />
+        {/each}
       {:else}
-        <p class="hint">Pick a folder (your SSD or hard-drive root) to start culling.</p>
+        <p class="hint">No drives detected.</p>
       {/if}
     </div>
   </aside>
 
+  <div class="vsplit" role="separator" tabindex="-1" onpointerdown={startTreeResize}></div>
+
+  <!-- ░ center ░ -->
   <main class="center">
-    {#if !writable}
-      <div class="banner">
-        Read-only mount — culling &amp; rating still save, but the delete sweep is
-        disabled here. Run the sweep where this drive is writable.
+    {#if !writable && currentDir}
+      <div class="banner">Read-only location — rating works; the delete sweep is disabled here.</div>
+    {/if}
+
+    <!-- top bar -->
+    <div class="bar">
+      <div class="grp">
+        <select class="sel" bind:value={settings.s.sortBy} onchange={() => settings.set({ sortBy: settings.s.sortBy })}>
+          <option value="name">Name</option>
+          <option value="date">Date</option>
+          <option value="type">Type</option>
+        </select>
+        <button class="ico" title="Sort direction" onclick={() => settings.set({ sortDir: settings.s.sortDir === "asc" ? "desc" : "asc" })}>
+          {settings.s.sortDir === "asc" ? "↑" : "↓"}
+        </button>
+      </div>
+
+      <div class="seg">
+        {#each [["all", "All"], ["image", "Photos"], ["video", "Video"], ["raw", "RAW"]] as [val, lbl]}
+          <button class="chip" class:on={settings.s.typeFilter === val} onclick={() => settings.set({ typeFilter: val as typeof settings.s.typeFilter })}>{lbl}</button>
+        {/each}
+      </div>
+
+      <div class="seg">
+        {#each [1, 2, 3, 4, 5] as n}
+          <button class="starf" class:on={minRating >= n} onclick={() => (minRating = minRating === n ? 0 : n)} title="Filter {n}+ stars">★</button>
+        {/each}
+      </div>
+
+      <div class="seg flags">
+        <button class="chip" class:on={flagFilter === "all"} onclick={() => (flagFilter = "all")}>All</button>
+        <button class="chip pick" class:on={flagFilter === "pick"} onclick={() => (flagFilter = "pick")}>Picks</button>
+        <button class="chip rej" class:on={flagFilter === "reject"} onclick={() => (flagFilter = "reject")}>Rejected</button>
+        <button class="chip" class:on={flagFilter === "unflagged"} onclick={() => (flagFilter = "unflagged")}>Unflagged</button>
+      </div>
+
+      <div class="seg">
+        <button class="dot any" class:on={labelFilter === null} onclick={() => (labelFilter = null)} title="Any label">∅</button>
+        {#each LABELS as l}
+          <button class="dot" class:on={labelFilter === l.key} style="background:var({l.varName})" title={l.name} aria-label={l.name} onclick={() => (labelFilter = labelFilter === l.key ? null : l.key)}></button>
+        {/each}
+      </div>
+
+      <button class="chip" class:on={settings.s.includeSub} onclick={toggleSub} title="Include photos from subfolders">⊞ Sub</button>
+
+      {#if mode === "grid"}
+        <div class="grp zoom" title="Thumbnail size">
+          <span class="mini">▦</span>
+          <input type="range" min="110" max="360" bind:value={settings.s.gridSize} onchange={() => settings.set({ gridSize: settings.s.gridSize })} />
+        </div>
+      {/if}
+
+      <div class="spacer"></div>
+
+      <!-- actions (top-right) -->
+      <button class="btn sm" onclick={selectAllFiltered} disabled={!view.length} title="Select all in view">Select all{view.length ? ` (${view.length})` : ""}</button>
+      <button class="btn sm danger" onclick={rejectSelected} disabled={selected.size === 0} title="Flag the selection as reject">
+        Reject{selected.size > 1 ? ` ${selected.size}` : ""}
+      </button>
+      <button
+        class="btn sm danger hold"
+        disabled={!writable || rejectedCount === 0}
+        onpointerdown={startHold}
+        onpointerup={endHold}
+        onpointerleave={endHold}
+        onpointercancel={endHold}
+        title="Hold to delete all {rejectedCount} rejected"
+      >
+        <span class="hold-fill" style="width:{(holdMs / HOLD_MS) * 100}%"></span>
+        <span class="hold-lbl">🗑 Delete{rejectedCount ? ` ${rejectedCount}` : ""} <em>(hold)</em></span>
+      </button>
+      <button class="ico gear" class:on={settingsOpen} onclick={() => (settingsOpen = !settingsOpen)} title="Settings">⚙</button>
+    </div>
+
+    <!-- settings popover -->
+    {#if settingsOpen}
+      <div class="pop">
+        <div class="row"><span>Theme</span>
+          <div class="seg">
+            <button class="chip" class:on={settings.s.theme === "light"} onclick={() => settings.set({ theme: "light" })}>Light</button>
+            <button class="chip" class:on={settings.s.theme === "dark"} onclick={() => settings.set({ theme: "dark" })}>Dark</button>
+          </div>
+        </div>
+        <div class="row"><span>Filmstrip</span>
+          <div class="seg">
+            {#each [["bottom", "Bottom"], ["right", "Right"], ["hidden", "Off"]] as [v, l]}
+              <button class="chip" class:on={settings.s.filmstripPos === v} onclick={() => settings.set({ filmstripPos: v as typeof settings.s.filmstripPos })}>{l}</button>
+            {/each}
+          </div>
+        </div>
+        <div class="row"><span>On delete</span>
+          <div class="seg">
+            <button class="chip" class:on={settings.s.deleteMode === "recycle"} onclick={() => settings.set({ deleteMode: "recycle" })}>Recycle Bin</button>
+            <button class="chip" class:on={settings.s.deleteMode === "folder"} onclick={() => settings.set({ deleteMode: "folder" })}>Move to folder</button>
+          </div>
+        </div>
+        {#if settings.s.deleteMode === "folder"}
+          <div class="row sub">
+            <span class="path" title={settings.s.rejectFolder ?? ""}>{settings.s.rejectFolder ? basename(settings.s.rejectFolder) : "(no folder set)"}</span>
+            <button class="btn sm" onclick={chooseRejectFolder}>Choose…</button>
+          </div>
+        {/if}
+        <div class="row hintrow">Press <kbd>L</kbd> for dim / lights-out mode.</div>
       </div>
     {/if}
 
-    <div class="bar">
-      <div class="seg">
-        <span class="lbl">Stars ≥</span>
-        {#each [0, 1, 2, 3, 4, 5] as n}
-          <button class="chip" class:on={filter.minRating === n} onclick={() => (filter.minRating = n)}>{n === 0 ? "All" : n}</button>
-        {/each}
+    <!-- body: viewport (+ optional right filmstrip) -->
+    <div class="body">
+      <div class="viewport">
+        {#if loading}
+          <div class="welcome"><p>Scanning {currentDir ? basename(currentDir) : ""}…</p></div>
+        {:else if !currentDir}
+          <div class="welcome">
+            <h1>🦊 fox-cull</h1>
+            <p>Pick a folder on the left to start culling. Browse-in-place — nothing is imported or changed.</p>
+          </div>
+        {:else if view.length === 0}
+          <div class="welcome"><p>Nothing here matches the current filters.</p></div>
+        {:else if mode === "loupe"}
+          <Loupe item={active} />
+        {:else}
+          <VirtualGrid items={view} {activeIndex} cellMin={settings.s.gridSize} bind:this={gridComp} cell={gridCell} />
+        {/if}
       </div>
-      <div class="seg">
-        <span class="lbl">Flag</span>
-        {#each [["all", null], ["pick", "pick"], ["reject", "reject"], ["unflagged", "unflagged"]] as [name, val]}
-          <button class="chip" class:on={filter.flag === val} onclick={() => (filter.flag = val as Filter["flag"])}>{name}</button>
-        {/each}
-      </div>
-      <div class="seg">
-        <span class="lbl">Label</span>
-        <button class="chip" class:on={filter.label === null} onclick={() => (filter.label = null)}>any</button>
-        {#each LABELS as l}
-          <button class="dot" class:on={filter.label === l.key} style="background:var({l.varName})" title={l.name} aria-label={l.name} onclick={() => (filter.label = filter.label === l.key ? null : l.key)}></button>
-        {/each}
-      </div>
-      <button class="chip" class:on={includeSub} onclick={toggleSub} title="Show photos from all subfolders too">⊞ Subfolders</button>
-      <div class="spacer"></div>
-      <button class="btn" onclick={selectAllFiltered} disabled={!filtered.length}>Select all ({filtered.length})</button>
-      <button class="btn danger" onclick={rejectSelected} disabled={selected.size === 0}>Reject sel ({selected.size})</button>
-      <button class="btn danger" onclick={openSweep} disabled={!writable || rejectedCount === 0}>Delete rejected…</button>
-    </div>
 
-    <div class="viewport">
-      {#if !root}
-        <div class="welcome">
-          <h1>🦊 fox-cull</h1>
-          <p>A fast, lightweight photo &amp; video culler. Browse in place — nothing is imported or modified.</p>
-          <button class="btn accent" onclick={chooseRoot}>Choose a folder to begin</button>
-        </div>
-      {:else if loading}
-        <div class="welcome"><p>Scanning {currentDir ? basename(currentDir) : ""}…</p></div>
-      {:else if !currentDir}
-        <div class="welcome"><p>Select a folder on the left.</p></div>
-      {:else if filtered.length === 0}
-        <div class="welcome"><p>No media{includeSub ? "" : " directly"} in <b>{basename(currentDir)}</b>{filter.minRating || filter.flag || filter.label ? " matches the filter" : ""}.</p></div>
-      {:else if mode === "loupe"}
-        <Loupe item={active} />
-      {:else}
-        <VirtualGrid items={filtered} {activeIndex} cellMin={176} bind:this={gridComp} cell={gridCell} />
+      {#if settings.s.filmstripPos === "right" && view.length}
+        <div class="vsplit" role="separator" tabindex="-1" onpointerdown={startStripResize}></div>
+        <aside class="rstrip" style="width:{settings.s.filmstripSize}px">
+          <VirtualStrip items={view} {activeIndex} orientation="v" cellSize={stripCell} cell={stripCellSnip} />
+        </aside>
       {/if}
     </div>
 
+    <!-- active-item info bar -->
     {#if active}
       <div class="info">
         <span class="name" title={active.path}>{active.name}</span>
-        <span class="meta">{active.kind} · {activeIndex + 1}/{filtered.length}</span>
+        <span class="meta">{active.kind} · {activeIndex + 1}/{view.length}</span>
         <div class="rate">
           {#each [1, 2, 3, 4, 5] as n}
             <button class="star" class:on={active.rating >= n} onclick={() => rate(n)}>★</button>
@@ -385,108 +527,125 @@
         {#each LABELS as l}
           <button class="dot sm" class:on={active.label === l.key} style="background:var({l.varName})" title={l.name} aria-label={l.name} onclick={() => label(l.key)}></button>
         {/each}
-        <button class="btn" class:on={active.flag === "pick"} onclick={() => flag("pick")}>Pick (P)</button>
-        <button class="btn danger" class:on={active.flag === "reject"} onclick={() => flag("reject")}>Reject (X)</button>
+        <button class="btn sm" class:on={active.flag === "pick"} onclick={() => flag("pick")}>Pick</button>
+        <button class="btn sm danger" class:on={active.flag === "reject"} onclick={() => flag("reject")}>Reject</button>
         <span class="spacer"></span>
         <span class="counts">✓ {pickCount} · ✕ {rejectedCount}</span>
       </div>
     {/if}
 
-    {#if filtered.length}
-      <VirtualStrip items={filtered} {activeIndex} cellSize={108} cell={stripCell} />
+    <!-- bottom filmstrip -->
+    {#if settings.s.filmstripPos === "bottom" && view.length}
+      <div class="hsplit" role="separator" tabindex="-1" onpointerdown={startStripResize}></div>
+      <div class="bstrip" style="height:{settings.s.filmstripSize}px">
+        <VirtualStrip items={view} {activeIndex} orientation="h" cellSize={stripCell} cell={stripCellSnip} />
+      </div>
     {/if}
   </main>
 </div>
 
-{#if sweep.open}
-  <div class="modal-bg" role="presentation" onclick={() => (sweep = { open: false, paths: [], result: null })}>
-    <div class="modal" role="dialog" onclick={(e) => e.stopPropagation()}>
-      {#if sweep.result}
-        <h2>Sweep complete</h2>
-        <p>Moved <b>{sweep.result.deleted}</b> file(s) to the Recycle Bin / Trash.</p>
-        {#if sweep.result.failed.length}
-          <p class="err">{sweep.result.failed.length} could not be deleted (read-only or in use).</p>
-        {/if}
-        <div class="modal-actions">
-          <button class="btn accent" onclick={() => (sweep = { open: false, paths: [], result: null })}>Done</button>
-        </div>
-      {:else}
-        <h2>Delete rejected files?</h2>
-        <p><b>{sweep.paths.length}</b> file(s) flagged <span class="rj">reject</span> across the whole library will be moved to the <b>Recycle Bin / Trash</b> (recoverable).</p>
-        <div class="modal-actions">
-          <button class="btn" onclick={() => (sweep = { open: false, paths: [], result: null })}>Cancel</button>
-          <button class="btn danger" disabled={!sweep.paths.length} onclick={confirmSweep}>Move {sweep.paths.length} to Trash</button>
-        </div>
-      {/if}
-    </div>
-  </div>
-{/if}
-
-{#if toast}
-  <button class="toast" onclick={() => (toast = null)}>{toast}</button>
-{/if}
-
 <style>
-  .app { display: grid; grid-template-columns: var(--tree-w) 1fr; height: 100vh; overflow: hidden; }
-  .tree { display: flex; flex-direction: column; background: var(--bg-panel); border-right: 1px solid var(--border); min-width: 0; }
-  .tree-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px; border-bottom: 1px solid var(--border); }
+  .app { display: flex; height: 100vh; overflow: hidden; }
+  .tree { display: flex; flex-direction: column; background: var(--bg-panel); border-right: 1px solid var(--border); flex: 0 0 auto; min-width: 0; }
+  .tree-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
   .brand { font-weight: 700; }
   .tree-body { overflow-y: auto; padding: 6px; flex: 1; }
-  .hint, .counts { color: var(--text-faint); font-size: 12.5px; }
-  .hint { padding: 10px; line-height: 1.5; }
+  .hint { padding: 10px; color: var(--text-faint); font-size: 12.5px; }
 
-  .center { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
+  .vsplit { flex: 0 0 5px; cursor: col-resize; background: transparent; }
+  .vsplit:hover { background: color-mix(in srgb, var(--accent) 40%, transparent); }
+  .hsplit { flex: 0 0 5px; cursor: row-resize; }
+  .hsplit:hover { background: color-mix(in srgb, var(--accent) 40%, transparent); }
 
-  .bar { display: flex; align-items: center; gap: 14px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg-panel); flex-wrap: wrap; }
-  .seg { display: flex; align-items: center; gap: 4px; }
-  .seg .lbl { color: var(--text-faint); font-size: 12px; margin-right: 2px; }
+  .center { display: flex; flex-direction: column; flex: 1; min-width: 0; height: 100vh; }
+
+  .bar { position: relative; display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--border); background: var(--bg-panel); flex-wrap: wrap; }
+  .grp { display: flex; align-items: center; gap: 4px; }
+  .seg { display: flex; align-items: center; gap: 3px; }
+  .seg.flags { gap: 2px; }
   .spacer { flex: 1; }
-  .chip { padding: 3px 8px; border-radius: 5px; font-size: 12.5px; color: var(--text-dim); border: 1px solid transparent; }
+  .sel { background: var(--bg-elev); color: var(--text); border: 1px solid var(--border); border-radius: 7px; padding: 4px 6px; font-size: 12.5px; }
+  .ico { width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--border); background: var(--bg-elev); font-size: 14px; line-height: 1; }
+  .ico:hover { background: var(--bg-hover); }
+  .ico.on { border-color: var(--accent); color: var(--accent); }
+  .chip { padding: 4px 9px; border-radius: 6px; font-size: 12px; color: var(--text-dim); border: 1px solid transparent; }
   .chip:hover { background: var(--bg-hover); }
-  .chip.on { background: var(--accent-dim); color: #fff; }
-  .dot { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.4); opacity: 0.55; }
+  .chip.on { background: var(--accent); color: var(--accent-on); }
+  .chip.rej.on { background: var(--reject); border-color: var(--reject); }
+  .chip.pick.on { background: var(--pick); border-color: var(--pick); }
+  .starf { font-size: 14px; color: var(--text-faint); padding: 0 1px; }
+  .starf.on { color: var(--star); }
+  .dot { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.25); opacity: 0.5; }
+  .dot.any { background: var(--bg-elev); color: var(--text-faint); font-size: 10px; line-height: 12px; opacity: 1; }
   .dot.sm { width: 13px; height: 13px; }
-  .dot.on { opacity: 1; outline: 2px solid var(--text); outline-offset: 1px; }
+  .dot.on { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
+  .zoom { gap: 6px; }
+  .zoom .mini { color: var(--text-faint); font-size: 12px; }
+  .zoom input { width: 90px; accent-color: var(--accent); }
+  .btn.sm { padding: 5px 10px; border-radius: 7px; font-size: 12.5px; }
 
-  .viewport { flex: 1; overflow: hidden; background: var(--bg); min-height: 0; }
+  .hold { position: relative; overflow: hidden; }
+  .hold-fill { position: absolute; left: 0; top: 0; bottom: 0; background: color-mix(in srgb, var(--reject) 35%, transparent); }
+  .hold-lbl { position: relative; z-index: 1; }
+  .hold em { font-style: normal; opacity: 0.6; font-size: 11px; }
 
-  .welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: var(--text-dim); text-align: center; padding: 24px; }
-  .welcome h1 { font-size: 30px; margin: 0; }
+  .pop { position: absolute; right: 10px; top: 46px; z-index: 30; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 12px; width: 320px; display: flex; flex-direction: column; gap: 10px; }
+  .pop .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+  .pop .row.sub { padding-left: 6px; }
+  .pop .path { color: var(--text-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pop .hintrow { color: var(--text-faint); font-size: 12px; }
+  kbd { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; font-size: 11px; }
 
-  .cell { position: relative; width: 100%; height: 100%; border: 2px solid transparent; border-radius: 5px; overflow: hidden; padding: 0; background: #0d0b08; }
-  .cell.selected { border-color: var(--text-dim); }
+  .body { flex: 1; display: flex; min-height: 0; }
+  .viewport { flex: 1; min-width: 0; background: var(--viewport-bg); overflow: hidden; }
+  .rstrip { flex: 0 0 auto; border-left: 1px solid var(--border); }
+  .bstrip { flex: 0 0 auto; border-top: 1px solid var(--border); }
+
+  .welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--text-dim); text-align: center; padding: 24px; }
+  .welcome h1 { font-size: 28px; margin: 0; }
+
+  .cell { position: relative; width: 100%; height: 100%; border: 2px solid transparent; border-radius: 6px; overflow: hidden; padding: 0; background: var(--viewport-bg); }
+  .cell.selected { border-color: var(--text-faint); }
   .cell.active { border-color: var(--accent); }
-  .cell.reject :global(img) { opacity: 0.4; }
+  .cell.reject :global(.media) { opacity: 0.35; }
   .ov { position: absolute; inset: 0; pointer-events: none; }
-  .lbl-dot { position: absolute; top: 5px; right: 5px; width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.5); }
-  .fl { position: absolute; top: 4px; left: 6px; font-weight: 700; text-shadow: 0 1px 3px #000; }
+  .lbl-dot { position: absolute; top: 5px; right: 5px; width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.4); }
+  .fl { position: absolute; top: 4px; left: 6px; font-weight: 700; text-shadow: 0 1px 3px rgba(0,0,0,0.6); }
   .fl.x { color: var(--reject); }
   .fl.pick { color: var(--pick); }
-  .stars { position: absolute; bottom: 4px; left: 6px; color: var(--star); font-size: 13px; text-shadow: 0 1px 3px #000; }
+  .stars { position: absolute; bottom: 4px; left: 6px; color: var(--star); font-size: 13px; text-shadow: 0 1px 3px rgba(0,0,0,0.6); }
 
-  .scell { position: relative; width: 100%; height: 100%; border: 2px solid transparent; border-radius: 4px; overflow: hidden; padding: 0; background: #0d0b08; }
+  .scell { position: relative; width: 100%; height: 100%; border: 2px solid transparent; border-radius: 5px; overflow: hidden; padding: 0; background: var(--viewport-bg); }
   .scell.active { border-color: var(--accent); }
-  .scell.reject { opacity: 0.5; }
-  .s-lbl { position: absolute; top: 3px; right: 3px; width: 10px; height: 10px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.4); }
-  .s-stars { position: absolute; bottom: 2px; left: 3px; font-size: 10px; color: var(--star); text-shadow: 0 1px 2px #000; }
-  .s-x { position: absolute; top: 2px; left: 4px; color: var(--reject); font-weight: 700; text-shadow: 0 1px 2px #000; }
-  .s-pick { position: absolute; top: 2px; left: 4px; color: var(--pick); font-weight: 700; text-shadow: 0 1px 2px #000; }
+  .scell.reject { opacity: 0.45; }
+  .s-lbl { position: absolute; top: 3px; right: 3px; width: 10px; height: 10px; border-radius: 2px; }
+  .s-stars { position: absolute; bottom: 2px; left: 3px; font-size: 10px; color: var(--star); text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
+  .s-x { position: absolute; top: 2px; left: 4px; color: var(--reject); font-weight: 700; text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
+  .s-pick { position: absolute; top: 2px; left: 4px; color: var(--pick); font-weight: 700; text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
 
-  .info { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-top: 1px solid var(--border); background: var(--bg-panel); }
-  .info .name { font-weight: 600; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .info { display: flex; align-items: center; gap: 10px; padding: 5px 12px; border-top: 1px solid var(--border); background: var(--bg-panel); }
+  .info .name { font-weight: 600; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .info .meta { color: var(--text-faint); font-size: 12px; }
+  .info .counts { color: var(--text-faint); font-size: 12.5px; }
   .rate { display: flex; }
   .star { color: var(--text-faint); font-size: 16px; }
   .star.on { color: var(--star); }
-  .btn.on { border-color: var(--accent); }
 
-  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 50; border: none; }
-  .modal { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; padding: 22px; width: min(460px, 90vw); }
-  .modal h2 { margin: 0 0 10px; }
-  .modal p { color: var(--text-dim); line-height: 1.5; }
-  .modal .err { color: var(--reject); }
-  .rj { color: var(--reject); font-weight: 600; }
-  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
-
-  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--bg-elev); border: 1px solid var(--accent-dim); color: var(--text); padding: 10px 16px; border-radius: 8px; z-index: 60; box-shadow: 0 6px 24px rgba(0,0,0,0.5); }
+  /* dim / lights-out mode */
+  .app[data-dim="1"] .tree,
+  .app[data-dim="1"] .bar,
+  .app[data-dim="1"] .info,
+  .app[data-dim="1"] .bstrip,
+  .app[data-dim="1"] .rstrip,
+  .app[data-dim="1"] .vsplit,
+  .app[data-dim="1"] .hsplit { opacity: 0.12; transition: opacity 0.15s; }
+  .app[data-dim="1"] .tree:hover,
+  .app[data-dim="1"] .bar:hover { opacity: 1; }
+  .app[data-dim="2"] .tree,
+  .app[data-dim="2"] .bar,
+  .app[data-dim="2"] .info,
+  .app[data-dim="2"] .bstrip,
+  .app[data-dim="2"] .rstrip,
+  .app[data-dim="2"] .vsplit,
+  .app[data-dim="2"] .hsplit { display: none; }
 </style>

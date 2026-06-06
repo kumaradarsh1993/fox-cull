@@ -1,0 +1,76 @@
+// Persisted app settings (theme, layout, sorting, delete behavior).
+// Mirrors the wispr-fox settings-store pattern: a runes-powered class that
+// loads once and writes through to tauri-plugin-store on every change.
+import { Store } from "@tauri-apps/plugin-store";
+
+export type Theme = "light" | "dark";
+export type FilmstripPos = "bottom" | "right" | "hidden";
+export type SortBy = "name" | "date" | "type";
+export type SortDir = "asc" | "desc";
+export type TypeFilter = "all" | "image" | "video" | "raw";
+export type DeleteMode = "recycle" | "folder";
+
+export interface AppSettings {
+  theme: Theme;
+  filmstripPos: FilmstripPos;
+  treeWidth: number;
+  filmstripSize: number;
+  gridSize: number;
+  sortBy: SortBy;
+  sortDir: SortDir;
+  typeFilter: TypeFilter;
+  includeSub: boolean;
+  deleteMode: DeleteMode;
+  rejectFolder: string | null;
+  lastDir: string | null;
+}
+
+const DEFAULTS: AppSettings = {
+  theme: "light",
+  filmstripPos: "bottom",
+  treeWidth: 270,
+  filmstripSize: 132,
+  gridSize: 176,
+  sortBy: "name",
+  sortDir: "asc",
+  typeFilter: "all",
+  includeSub: true,
+  deleteMode: "recycle",
+  rejectFolder: null,
+  lastDir: null,
+};
+
+const FILE = "fox-cull-settings.json";
+const KEY = "settings";
+
+class Settings {
+  s = $state<AppSettings>({ ...DEFAULTS });
+  ready = $state(false);
+  private store: Store | null = null;
+
+  async init() {
+    if (this.ready) return;
+    try {
+      this.store = await Store.load(FILE);
+      const loaded = await this.store.get<AppSettings>(KEY);
+      if (loaded) this.s = { ...DEFAULTS, ...loaded };
+    } catch {
+      // first run / store unavailable — defaults stand
+    }
+    this.ready = true;
+  }
+
+  async set(patch: Partial<AppSettings>) {
+    Object.assign(this.s, patch);
+    try {
+      if (this.store) {
+        await this.store.set(KEY, { ...this.s });
+        await this.store.save();
+      }
+    } catch {
+      // ignore persistence failures (settings still apply in-session)
+    }
+  }
+}
+
+export const settings = new Settings();
