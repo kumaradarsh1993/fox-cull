@@ -18,12 +18,19 @@ use crate::thumbs;
 /// (4000px → 2000px ≥ 1920), so the sharp decode is ~4x cheaper than full-res.
 const LOUPE_MAX: u32 = 1920;
 
-/// Threads the background thumbnail warmer is allowed to use. Deliberately small:
-/// v0.3.0 warmed across all 12 cores, and 12 simultaneous multi-MB reads thrashed
-/// the external SSD so badly that individual reads stalled 50+ seconds and starved
-/// the photo the user was actually looking at. ~4 concurrent reads is the sweet
-/// spot for an external SSD and leaves the foreground decodes plenty of CPU.
-const WARM_THREADS: usize = 4;
+/// Threads the background thumbnail warmer may use. Deliberately small and
+/// machine-aware: v0.3.0 warmed across ALL cores, and a dozen simultaneous
+/// multi-MB reads thrashed the external SSD so badly that individual reads
+/// stalled 50+ seconds and starved the photo the user was looking at. We cap at
+/// ~half the cores, clamped to 2..=4 — leaving the foreground (loupe + visible
+/// cells) plenty of CPU, and keeping the USB-SSD read queue shallow. On the thin
+/// XPS 13 (4 cores) this is 2; on the Alienware (12) it's 4.
+fn warm_threads() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (cores / 2).clamp(2, 4)
+}
 
 /// Dedicated, size-bounded rayon pool for warming (NOT the global pool, which
 /// would grab every core).
@@ -31,7 +38,7 @@ fn warm_pool() -> &'static rayon::ThreadPool {
     static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
-            .num_threads(WARM_THREADS)
+            .num_threads(warm_threads())
             .build()
             .expect("warm pool")
     })

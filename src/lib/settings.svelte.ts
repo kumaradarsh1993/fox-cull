@@ -25,6 +25,7 @@ export interface AppSettings {
   deleteMode: DeleteMode;
   rejectFolder: string | null;
   lastDir: string | null;
+  lastActivePath: string | null;
 }
 
 const DEFAULTS: AppSettings = {
@@ -41,6 +42,7 @@ const DEFAULTS: AppSettings = {
   deleteMode: "recycle",
   rejectFolder: null,
   lastDir: null,
+  lastActivePath: null,
 };
 
 const FILE = "fox-cull-settings.json";

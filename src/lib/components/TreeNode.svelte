@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from "$lib/api";
   import type { TreeDir } from "$lib/types";
+  import Self from "./TreeNode.svelte";
 
   let {
     node,
@@ -18,8 +19,7 @@
   let kids = $state<TreeDir[] | null>(null);
   let loading = $state(false);
 
-  async function toggle(e: MouseEvent) {
-    e.stopPropagation();
+  async function toggle() {
     open = !open;
     if (open && kids === null) {
       loading = true;
@@ -33,23 +33,29 @@
   }
 </script>
 
-<button
-  class="trow"
-  class:active={currentDir === node.path}
-  style="padding-left:{6 + depth * 12}px"
-  onclick={() => onselect(node.path)}
->
+<div class="trow" class:active={currentDir === node.path} style="padding-left:{4 + depth * 14}px">
   {#if node.has_children}
-    <span class="arrow" class:open onclick={toggle} role="button" tabindex="-1">▸</span>
+    <button
+      class="chev"
+      class:open
+      onclick={toggle}
+      aria-label={open ? "Collapse" : "Expand"}
+      title={open ? "Collapse" : "Expand"}
+    >
+      {open ? "▾" : "▸"}
+    </button>
   {:else}
-    <span class="arrow-spacer"></span>
+    <span class="chev-spacer"></span>
   {/if}
-  <span class="tname" title={node.name}>{node.name}</span>
-</button>
+  <button class="tname" title={node.path} onclick={() => onselect(node.path)}>
+    <span class="ico">{open ? "📂" : "📁"}</span>
+    <span class="label">{node.name}</span>
+  </button>
+</div>
 
 {#if open && kids}
   {#each kids as k (k.path)}
-    <svelte:self node={k} {currentDir} {onselect} depth={depth + 1} />
+    <Self node={k} {currentDir} {onselect} depth={depth + 1} />
   {/each}
 {/if}
 
@@ -57,36 +63,64 @@
   .trow {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 2px;
     width: 100%;
-    padding: 4px 8px 4px 6px;
+    border-radius: 6px;
+  }
+  .trow.active {
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .trow.active .label {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  /* Bigger, obvious expand/collapse target — clearly separate from the row's
+     select action, with a filled triangle that flips on state. */
+  .chev {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    color: var(--text-faint);
+    border-radius: 5px;
+  }
+  .chev:hover {
+    background: var(--bg-hover);
+    color: var(--accent);
+  }
+  .chev-spacer {
+    flex: 0 0 auto;
+    width: 24px;
+  }
+
+  .tname {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 6px;
     text-align: left;
     border-radius: 5px;
     color: var(--text-dim);
     font-size: 13px;
     line-height: 1.2;
   }
-  .trow:hover {
+  .tname:hover {
     background: var(--bg-hover);
     color: var(--text);
   }
-  .trow.active {
-    background: var(--accent-dim);
-    color: #fff;
+  .ico {
+    font-size: 13px;
+    flex: 0 0 auto;
+    opacity: 0.85;
   }
-  .arrow,
-  .arrow-spacer {
-    display: inline-block;
-    width: 12px;
-    flex: 0 0 12px;
-    text-align: center;
-    transition: transform 0.12s;
-    color: var(--text-faint);
-  }
-  .arrow.open {
-    transform: rotate(90deg);
-  }
-  .tname {
+  .label {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

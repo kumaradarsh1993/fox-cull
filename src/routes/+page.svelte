@@ -98,7 +98,9 @@
     } catch {
       /* */
     }
-    if (settings.s.lastDir) openFolder(settings.s.lastDir);
+    // Reopen the last folder AND land on the last photo we were looking at.
+    if (settings.s.lastDir)
+      openFolder(settings.s.lastDir, { selectPath: settings.s.lastActivePath });
   });
 
   function rootForDir(dir: string): string {
@@ -116,7 +118,10 @@
     }
   }
 
-  async function openFolder(dir: string) {
+  async function openFolder(
+    dir: string,
+    opts: { selectPath?: string | null; selectIndex?: number } = {},
+  ) {
     currentDir = dir;
     loading = true;
     resetThumbs();
@@ -129,12 +134,29 @@
       items = [];
       console.error(e);
     }
-    activeIndex = 0;
-    if (view.length) selected = new Set([view[0].path]);
+    // Land on the requested photo (restore on launch) or index (stay put after a
+    // delete), else the top.
+    let idx = 0;
+    if (opts.selectPath) {
+      const found = view.findIndex((i) => i.path === opts.selectPath);
+      if (found >= 0) idx = found;
+    } else if (opts.selectIndex != null) {
+      idx = Math.max(0, Math.min(opts.selectIndex, view.length - 1));
+    }
+    activeIndex = idx;
+    if (view.length) selected = new Set([view[idx].path]);
     loading = false;
     settings.set({ lastDir: dir });
-    // Proactively warm every thumbnail in parallel so scrolling is instant.
-    api.warmThumbnails(items.map((i) => i.path), THUMB_MAX);
+    // Let the grid mount, then bring the restored/next photo into view.
+    setTimeout(scrollActive, 80);
+    // Warm thumbnails in the order they're shown (top-down), but only after the
+    // visible cells have had a head start — the on-screen lazy loads grab the
+    // disk first, then the warmer trickles the rest in. Guard against a folder
+    // switch landing during the delay.
+    const order = view.map((i) => i.path);
+    setTimeout(() => {
+      if (currentDir === dir) api.warmThumbnails(order, THUMB_MAX);
+    }, 500);
     refreshTags();
   }
 
@@ -170,11 +192,20 @@
     gridComp?.scrollToIndex(activeIndex);
   }
 
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  function rememberActive() {
+    const a = view[activeIndex];
+    if (!a) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => settings.set({ lastActivePath: a.path }), 400);
+  }
+
   function setActiveTo(i: number) {
     activeIndex = Math.max(0, Math.min(i, view.length - 1));
     const a = view[activeIndex];
     if (a) selected = new Set([a.path]);
     scrollActive();
+    rememberActive();
   }
 
   function move(delta: number) {
@@ -306,7 +337,9 @@
       settings.s.deleteMode,
       settings.s.deleteMode === "folder" ? dest : null,
     );
-    if (currentDir) await openFolder(currentDir); // silent refresh
+    // Stay where we were — after the rejected shots vanish, the same index lands
+    // on the next surviving photo, not back at the top of the folder.
+    if (currentDir) await openFolder(currentDir, { selectIndex: activeIndex });
   }
 
   // ── panel resizing ──────────────────────────────────────────────────────
