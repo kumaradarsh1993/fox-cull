@@ -89,6 +89,26 @@ pub fn largest_embedded_jpeg(data: &[u8]) -> Option<&[u8]> {
     best.map(|(s, e)| &data[s..e])
 }
 
+/// Extract the EXIF-embedded **thumbnail** JPEG (the small preview phones/cameras
+/// store in the APP1 segment). The main image's SOI sits at offset 0; the
+/// thumbnail is a *complete* `FFD8 .. FFD9` JPEG that appears next, near the
+/// start of the file. We skip the main SOI and return the first complete JPEG we
+/// find — so we can read just the head of a multi-MB file and still get a usable
+/// thumbnail without decoding the full-resolution image. Returns `None` if the
+/// (truncated) buffer holds no complete embedded JPEG.
+pub fn embedded_thumbnail_jpeg(data: &[u8]) -> Option<&[u8]> {
+    let mut i = 2usize; // skip the main image's SOI at byte 0
+    while i + 1 < data.len() {
+        if data[i] == 0xFF && data[i + 1] == 0xD8 {
+            if let Some(end) = find_eoi(data, i + 2) {
+                return Some(&data[i..end]);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Index just past the `FFD9` end-of-image marker, searching from `start`.
 fn find_eoi(data: &[u8], start: usize) -> Option<usize> {
     let mut i = start;

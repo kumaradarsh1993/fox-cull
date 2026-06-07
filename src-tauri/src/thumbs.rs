@@ -57,6 +57,28 @@ fn decode_jpeg_scaled(bytes: &[u8], max: u32) -> Option<DynamicImage> {
     }
 }
 
+/// Fast path for grid thumbnails: decode ONLY the EXIF-embedded thumbnail that
+/// phones/cameras store in the file header. Reads just the first ~768 KB (not the
+/// whole multi-MB file) and decodes a ~512px image, so this is ~7x less disk I/O
+/// and a near-instant decode. Returns `None` if there's no embedded thumbnail or
+/// it's too small to look crisp at `max` — the caller then full-decodes.
+fn embedded_thumb(path: &Path, max: u32) -> Option<DynamicImage> {
+    use std::io::Read;
+    let f = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::with_capacity(768 * 1024);
+    f.take(768 * 1024).read_to_end(&mut buf).ok()?;
+    let jpg = media::embedded_thumbnail_jpeg(&buf)?;
+    let img = image::load_from_memory(jpg).ok()?;
+    // Accept only if the embedded thumb fills at least 75% of the target edge,
+    // otherwise it'd look soft (some cameras embed a tiny 160px thumbnail).
+    let long = img.width().max(img.height());
+    if long * 4 >= max * 3 {
+        Some(img)
+    } else {
+        None
+    }
+}
+
 fn load_source(path: &Path, kind: Kind, max: u32) -> Result<DynamicImage, String> {
     match kind {
         // RAW: pull the embedded full-res JPEG preview rather than demosaic,
@@ -107,7 +129,22 @@ pub fn ensure(cache_dir: &Path, path: &Path, kind: Kind, max: u32) -> Result<Pat
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     let t0 = Instant::now();
-    let img = load_source(path, kind, max)?;
+    // Grid-sized JPEG thumbnails: try the embedded-thumbnail fast path first.
+    let mut source = "full";
+    let img = if max <= 512
+        && matches!(kind, Kind::Image)
+        && matches!(media::ext_lower(path).as_str(), "jpg" | "jpeg")
+    {
+        match embedded_thumb(path, max) {
+            Some(i) => {
+                source = "embed";
+                i
+            }
+            None => load_source(path, kind, max)?,
+        }
+    } else {
+        load_source(path, kind, max)?
+    };
     let (sw, sh) = (img.width(), img.height());
     let decode_ms = t0.elapsed().as_millis();
     let t1 = Instant::now();
@@ -119,11 +156,12 @@ pub fn ensure(cache_dir: &Path, path: &Path, kind: Kind, max: u32) -> Result<Pat
     let rgb = DynamicImage::ImageRgb8(img.to_rgb8());
     rgb.save(&out).map_err(|e| e.to_string())?;
     crate::log::line(&format!(
-        "THUMB-GEN {} {}x{} max={} decode={}ms resize+enc={}ms",
+        "THUMB-GEN {} {}x{} max={} src={} decode={}ms resize+enc={}ms",
         name,
         sw,
         sh,
         max,
+        source,
         decode_ms,
         t1.elapsed().as_millis()
     ));

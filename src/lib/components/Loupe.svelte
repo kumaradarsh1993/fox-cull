@@ -1,20 +1,30 @@
 <script lang="ts">
   import { api } from "$lib/api";
+  import { loadThumb } from "$lib/thumbnail-loader";
   import type { MediaItem } from "$lib/types";
 
   let { item }: { item: MediaItem | null } = $props();
 
-  let src = $state<string | null>(null);
+  let src = $state<string | null>(null); // sharp, capped preview
+  let lowSrc = $state<string | null>(null); // cached grid thumb shown instantly
   let failed = $state(false);
   let videoErr = $state(false);
 
-  // Re-resolve the large source whenever the active item changes.
+  // Re-resolve whenever the active item changes. Show the already-cached small
+  // thumbnail at once (it's in memory — zero wait) so the photo never appears to
+  // hang, then swap in the sharp preview the moment it's ready.
   $effect(() => {
     const it = item;
     src = null;
+    lowSrc = null;
     failed = false;
     videoErr = false;
     if (!it) return;
+    if (it.kind === "image" || it.kind === "raw") {
+      loadThumb(it.path, 320).then((s) => {
+        if (item === it && s && !src) lowSrc = s;
+      });
+    }
     (async () => {
       try {
         const p = await api.loupeSrc(it.path);
@@ -52,6 +62,8 @@
     </div>
   {:else if src}
     <img {src} alt={item.name} draggable="false" />
+  {:else if lowSrc}
+    <img class="low" src={lowSrc} alt={item.name} draggable="false" />
   {:else}
     <div class="empty">loading…</div>
   {/if}
@@ -72,6 +84,11 @@
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
+  }
+  /* the instantly-shown cached thumb, upscaled — a touch of blur hides
+     blockiness until the sharp preview swaps in */
+  .low {
+    filter: blur(0.4px);
   }
   .empty {
     color: var(--text-faint);

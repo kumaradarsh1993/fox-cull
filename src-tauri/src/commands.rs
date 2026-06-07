@@ -13,10 +13,29 @@ use crate::catalog::Catalog;
 use crate::media::{self, Kind};
 use crate::thumbs;
 
-/// Long edge (px) of the capped loupe/focus preview. Big enough to look sharp
-/// full-screen on a 4K panel, small enough to decode + paint instantly (no more
-/// progressive top-down render of a 50MP original).
-const LOUPE_MAX: u32 = 2560;
+/// Long edge (px) of the capped loupe/focus preview. 1920 is sharp full-screen
+/// while letting the JPEG decoder pick a 1/2 DCT scale on 12MP phone shots
+/// (4000px → 2000px ≥ 1920), so the sharp decode is ~4x cheaper than full-res.
+const LOUPE_MAX: u32 = 1920;
+
+/// Threads the background thumbnail warmer is allowed to use. Deliberately small:
+/// v0.3.0 warmed across all 12 cores, and 12 simultaneous multi-MB reads thrashed
+/// the external SSD so badly that individual reads stalled 50+ seconds and starved
+/// the photo the user was actually looking at. ~4 concurrent reads is the sweet
+/// spot for an external SSD and leaves the foreground decodes plenty of CPU.
+const WARM_THREADS: usize = 4;
+
+/// Dedicated, size-bounded rayon pool for warming (NOT the global pool, which
+/// would grab every core).
+fn warm_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(WARM_THREADS)
+            .build()
+            .expect("warm pool")
+    })
+}
 
 /// Process-wide state: the currently selected library root and the on-disk
 /// thumbnail cache directory (in app-data, never on the user's SSD).
@@ -226,6 +245,9 @@ pub fn list_folder_media(
     if !p.is_dir() {
         return Err(format!("not a directory: {dir}"));
     }
+    // Cancel any in-flight warming for the folder we're leaving, so a rapid
+    // folder switch can't leave two warm floods thrashing the disk at once.
+    state.warm_gen.fetch_add(1, Ordering::SeqCst);
     let root = state.root.lock().clone();
 
     let t0 = Instant::now();
@@ -359,17 +381,21 @@ pub async fn warm_thumbnails(
     let gen = state.warm_gen.clone();
     let cache_dir = state.cache_dir.clone();
     let _ = tauri::async_runtime::spawn_blocking(move || {
-        paths.par_iter().for_each(|path| {
-            // Abandon the moment a newer folder selection supersedes us.
-            if gen.load(Ordering::SeqCst) != my_gen {
-                return;
-            }
-            let p = PathBuf::from(path);
-            let kind = media::classify(&p);
-            if matches!(kind, Kind::Video | Kind::Other) {
-                return;
-            }
-            let _ = thumbs::ensure(&cache_dir, &p, kind, max);
+        // Run on the small dedicated pool so we never monopolize the cores the
+        // foreground (loupe + visible cells) needs.
+        warm_pool().install(|| {
+            paths.par_iter().for_each(|path| {
+                // Abandon the moment a newer folder selection supersedes us.
+                if gen.load(Ordering::SeqCst) != my_gen {
+                    return;
+                }
+                let p = PathBuf::from(path);
+                let kind = media::classify(&p);
+                if matches!(kind, Kind::Video | Kind::Other) {
+                    return;
+                }
+                let _ = thumbs::ensure(&cache_dir, &p, kind, max);
+            });
         });
     })
     .await;

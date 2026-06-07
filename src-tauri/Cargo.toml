@@ -53,6 +53,20 @@ lto = "thin"
 opt-level = "s"
 strip = true
 
+# The shipped build is opt-level="s" (size) everywhere EXCEPT the image-decode
+# hot path — those crates get full speed optimization so thumbnail/preview decode
+# is as fast in the release binary as it is in dev. Mirrors the dev overrides.
+[profile.release.package.image]
+opt-level = 3
+[profile.release.package.jpeg-decoder]
+opt-level = 3
+[profile.release.package.zune-jpeg]
+opt-level = 3
+[profile.release.package.zune-core]
+opt-level = 3
+[profile.release.package.png]
+opt-level = 3
+
 # `tauri dev` builds Rust unoptimized, which makes image decode/resize 30-50x
 # slower (~5.7s per 12MP thumbnail observed). Optimize ONLY the image-decoding
 # crates in dev so thumbnails are fast while our own code stays debuggable.
