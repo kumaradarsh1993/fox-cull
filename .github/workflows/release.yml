@@ -127,6 +127,36 @@ jobs:
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: ignore
 
+      # Standalone, no-installer build for running off an SSD / USB stick. The
+      # bare exe + a sibling `fox-cull-data` folder = fully portable (the app
+      # roots its catalog/cache/settings in that folder).
+      - name: Package portable (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}" -replace '^v',''
+          $dir = "fox-cull-portable"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item src-tauri/target/release/fox-cull.exe "$dir/fox-cull.exe"
+          New-Item -ItemType Directory -Force "$dir/fox-cull-data" | Out-Null
+          "Keep this folder next to fox-cull.exe. fox-cull stores its catalog, thumbnail cache and settings here, so the whole app is portable across machines." | Out-File -Encoding utf8 "$dir/fox-cull-data/READ-ME.txt"
+          Compress-Archive -Path "$dir/*" -DestinationPath "fox-cull_${ver}_x64_portable.zip" -Force
+      - name: Upload portable to release (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const ver = '${{ github.ref_name }}'.replace(/^v/, '');
+            const name = `fox-cull_${ver}_x64_portable.zip`;
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ needs.create-release.outputs.release_id }},
+              name,
+              data: fs.readFileSync(name),
+            });
+
   publish-release:
     needs: [create-release, build]
     runs-on: ubuntu-22.04

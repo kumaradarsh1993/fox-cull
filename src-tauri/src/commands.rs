@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
 use parking_lot::Mutex;
+use rayon::prelude::*;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
@@ -10,11 +13,24 @@ use crate::catalog::Catalog;
 use crate::media::{self, Kind};
 use crate::thumbs;
 
+/// Long edge (px) of the capped loupe/focus preview. Big enough to look sharp
+/// full-screen on a 4K panel, small enough to decode + paint instantly (no more
+/// progressive top-down render of a 50MP original).
+const LOUPE_MAX: u32 = 2560;
+
 /// Process-wide state: the currently selected library root and the on-disk
 /// thumbnail cache directory (in app-data, never on the user's SSD).
 pub struct AppState {
     pub root: Mutex<Option<PathBuf>>,
     pub cache_dir: PathBuf,
+    /// Where app data (config, default catalog, cache) lives — app-data normally,
+    /// or a `fox-cull-data` folder next to the exe in portable mode.
+    pub data_root: PathBuf,
+    /// Current catalog file path (relocatable onto the user's SSD).
+    pub catalog_path: Mutex<PathBuf>,
+    /// Bumped on every folder switch so an in-flight background warming pass for
+    /// the previous folder abandons itself instead of fighting for cores.
+    pub warm_gen: Arc<AtomicU64>,
 }
 
 #[derive(Serialize)]
@@ -32,9 +48,11 @@ pub struct MediaItem {
     pub kind: String,
     pub ext: String,
     pub mtime: i64, // file modified time (epoch secs) — for date sorting
+    pub size: u64,  // file size in bytes — for the Details view + size sorting
     pub rating: i64,
     pub label: Option<String>,
     pub flag: Option<String>,
+    pub tags: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -101,7 +119,7 @@ pub fn list_tree(dir: String) -> Result<Vec<TreeDir>, String> {
 /// Recursively gather media file paths under `dir`. Uses `file_type()` (free on
 /// Windows, no extra stat) and does NOT follow symlinks, so symlink loops can't
 /// hang the walk. Hidden folders (dotfolders) are skipped.
-fn collect(dir: &Path, recursive: bool, out: &mut Vec<(PathBuf, i64)>) {
+fn collect(dir: &Path, recursive: bool, out: &mut Vec<(PathBuf, i64, u64)>) {
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return,
@@ -132,14 +150,15 @@ fn collect(dir: &Path, recursive: bool, out: &mut Vec<(PathBuf, i64)>) {
             let path = entry.path();
             if media::is_media(&path) {
                 // metadata() is cached from the dir enumeration on Windows (free).
-                let mtime = entry
-                    .metadata()
-                    .ok()
+                let md = entry.metadata().ok();
+                let mtime = md
+                    .as_ref()
                     .and_then(|m| m.modified().ok())
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
-                out.push((path, mtime));
+                let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
+                out.push((path, mtime, size));
             }
         }
     }
@@ -210,14 +229,14 @@ pub fn list_folder_media(
     let root = state.root.lock().clone();
 
     let t0 = Instant::now();
-    let mut paths: Vec<(PathBuf, i64)> = Vec::new();
+    let mut paths: Vec<(PathBuf, i64, u64)> = Vec::new();
     collect(p, recursive, &mut paths);
     let walk_ms = t0.elapsed().as_millis();
     let file_count = paths.len();
 
     let mut items: Vec<MediaItem> = paths
         .into_iter()
-        .map(|(path, mtime)| {
+        .map(|(path, mtime, size)| {
             let abs = path.to_string_lossy().to_string();
             MediaItem {
                 name: path
@@ -228,10 +247,12 @@ pub fn list_folder_media(
                 kind: media::classify(&path).as_str().to_string(),
                 ext: media::ext_lower(&path),
                 mtime,
+                size,
                 path: abs,
                 rating: 0,
                 label: None,
                 flag: None,
+                tags: Vec::new(),
             }
         })
         .collect();
@@ -248,6 +269,13 @@ pub fn list_folder_media(
             item.rating = d.rating;
             item.label = d.label.clone();
             item.flag = d.flag.clone();
+        }
+    }
+    // Attach tags (separate many-to-many table) in one query for the subtree.
+    let mut tagmap = catalog.tags_under(&prefix);
+    for item in &mut items {
+        if let Some(tags) = tagmap.remove(&item.rel) {
+            item.tags = tags;
         }
     }
     crate::log::line(&format!(
@@ -293,17 +321,20 @@ pub async fn thumbnail(
     .map_err(|e| e.to_string())?
 }
 
-/// Source path for the large loupe view. Images/videos serve the original
-/// (the webview honors EXIF orientation for `<img>`); RAW serves a generated,
-/// orientation-baked full-res preview since the webview can't render `.NEF`.
+/// Source path for the large loupe/focus view. Images and RAW serve a generated,
+/// orientation-baked, **capped** preview (long edge <= LOUPE_MAX): RAW because the
+/// webview can't render `.NEF`, and ordinary images because handing the webview a
+/// 50MP original makes it paint top-down over several seconds — the capped preview
+/// decodes via the DCT fast path and appears at once. Videos serve the original.
 #[tauri::command]
 pub async fn loupe_src(state: State<'_, AppState>, path: String) -> Result<String, String> {
     let p = PathBuf::from(&path);
-    match media::classify(&p) {
-        Kind::Raw => {
+    let kind = media::classify(&p);
+    match kind {
+        Kind::Raw | Kind::Image => {
             let cache_dir = state.cache_dir.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                thumbs::ensure(&cache_dir, &p, Kind::Raw, 2560)
+                thumbs::ensure(&cache_dir, &p, kind, LOUPE_MAX)
                     .map(|o| o.to_string_lossy().to_string())
             })
             .await
@@ -311,6 +342,38 @@ pub async fn loupe_src(state: State<'_, AppState>, path: String) -> Result<Strin
         }
         _ => Ok(path),
     }
+}
+
+/// Proactively generate (and disk-cache) grid thumbnails for a whole folder in
+/// parallel across all cores, so scrolling the grid/filmstrip is smooth instead
+/// of decoding lazily under the user's cursor. Fire-and-forget from the frontend
+/// right after a folder loads. Cancels itself if the user switches folders (the
+/// generation token moved on). Videos/unknowns are skipped.
+#[tauri::command]
+pub async fn warm_thumbnails(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    max: u32,
+) -> Result<(), String> {
+    let my_gen = state.warm_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let gen = state.warm_gen.clone();
+    let cache_dir = state.cache_dir.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        paths.par_iter().for_each(|path| {
+            // Abandon the moment a newer folder selection supersedes us.
+            if gen.load(Ordering::SeqCst) != my_gen {
+                return;
+            }
+            let p = PathBuf::from(path);
+            let kind = media::classify(&p);
+            if matches!(kind, Kind::Video | Kind::Other) {
+                return;
+            }
+            let _ = thumbs::ensure(&cache_dir, &p, kind, max);
+        });
+    })
+    .await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -387,6 +450,40 @@ pub fn set_flag_many(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn add_tag(
+    state: State<'_, AppState>,
+    catalog: State<'_, Catalog>,
+    paths: Vec<String>,
+    tag: String,
+) -> Result<(), String> {
+    let tag = tag.trim().to_string();
+    if tag.is_empty() {
+        return Ok(());
+    }
+    catalog
+        .add_tag_many(&rels_for(&state, &paths), &tag)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn remove_tag(
+    state: State<'_, AppState>,
+    catalog: State<'_, Catalog>,
+    paths: Vec<String>,
+    tag: String,
+) -> Result<(), String> {
+    catalog
+        .remove_tag_many(&rels_for(&state, &paths), &tag)
+        .map_err(|e| e.to_string())
+}
+
+/// Distinct tags with usage counts, for the filter UI.
+#[tauri::command]
+pub fn list_tags(catalog: State<'_, Catalog>) -> Vec<(String, i64)> {
+    catalog.all_tags()
+}
+
 /// Absolute paths of every file currently flagged `reject`, across the whole
 /// catalog — the input to the delete sweep.
 #[tauri::command]
@@ -402,12 +499,55 @@ pub fn list_rejected(state: State<'_, AppState>, catalog: State<'_, Catalog>) ->
         .collect()
 }
 
-/// Move one file into `dest`, preserving its path relative to the library root
-/// so files from different subfolders don't collide. Tries a fast rename first,
-/// falls back to copy+remove across volumes.
-fn move_into(root: &Option<PathBuf>, dest: &Path, src: &str) -> Result<(), String> {
-    let rel = rel_of(root, src);
-    let target = dest.join(&rel);
+/// Name of the auto-created, per-drive reject folder (the "recycle bin alt").
+const REJECT_DIRNAME: &str = "_FoxCull Recycle Bin";
+
+/// Volume/drive root of an absolute path: `C:\` on Windows; `/Volumes/<name>`
+/// (or `/`) on macOS/Linux. Used to mirror the folder structure from the drive
+/// root into the reject folder, exactly as the user described
+/// (`C:\…\alpha\beta\gamma\x.jpg` → `C:\_FoxCull Recycle Bin\alpha\beta\gamma\x.jpg`).
+fn drive_root(path: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let b = path.as_bytes();
+        if b.len() >= 3 && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/') {
+            return PathBuf::from(format!("{}:\\", b[0] as char));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(rest) = path.strip_prefix("/Volumes/") {
+            if let Some(name) = rest.split('/').next() {
+                if !name.is_empty() {
+                    return PathBuf::from(format!("/Volumes/{name}"));
+                }
+            }
+        }
+    }
+    PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" })
+}
+
+/// Path of `src` relative to its drive root (with the drive prefix stripped),
+/// so it can be re-rooted under the reject folder without collisions.
+fn rel_from_drive(src: &str) -> PathBuf {
+    let root = drive_root(src);
+    Path::new(src)
+        .strip_prefix(&root)
+        .map(|r| r.to_path_buf())
+        .unwrap_or_else(|_| PathBuf::from(Path::new(src).file_name().unwrap_or_default()))
+}
+
+/// Move one file into the reject folder, mirroring its path from the drive root
+/// so shots from different subfolders never collide. `dest` is the chosen reject
+/// folder, or `None` to auto-target `<driveRoot>/_FoxCull Recycle Bin` per file
+/// (handles selections spanning multiple drives). Fast rename first; copy+remove
+/// across volumes.
+fn move_into(dest: &Option<PathBuf>, src: &str) -> Result<(), String> {
+    let base = match dest {
+        Some(d) => d.clone(),
+        None => drive_root(src).join(REJECT_DIRNAME),
+    };
+    let target = base.join(rel_from_drive(src));
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -431,17 +571,19 @@ pub fn dispose_rejected(
     dest: Option<String>,
 ) -> TrashOutcome {
     let root = state.root.lock().clone();
-    let dest_path = dest.as_deref().map(PathBuf::from);
+    // An explicit destination overrides; otherwise "folder" mode auto-targets a
+    // per-drive `_FoxCull Recycle Bin` (computed inside move_into).
+    let dest_path = dest
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
     let mut deleted = 0usize;
     let mut failed = Vec::new();
     let mut errors = Vec::new();
     let mut forget = Vec::new();
     for p in &paths {
         let result = if mode == "folder" {
-            match &dest_path {
-                Some(d) => move_into(&root, d, p),
-                None => Err("no destination folder set".into()),
-            }
+            move_into(&dest_path, p)
         } else {
             trash::delete(p).map_err(|e| e.to_string())
         };
@@ -462,6 +604,96 @@ pub fn dispose_rejected(
         failed,
         errors,
     }
+}
+
+#[derive(Serialize)]
+pub struct CatalogInfo {
+    pub path: String,
+    pub data_root: String,
+    pub is_default: bool,
+}
+
+/// Where the catalog currently lives, and whether it's the default location.
+#[tauri::command]
+pub fn catalog_info(state: State<'_, AppState>) -> CatalogInfo {
+    let path = state.catalog_path.lock().clone();
+    let default = state.data_root.join("catalog.sqlite");
+    CatalogInfo {
+        path: path.to_string_lossy().to_string(),
+        data_root: state.data_root.to_string_lossy().to_string(),
+        is_default: path == default,
+    }
+}
+
+/// Relocate the catalog into `dir` (e.g. onto the SSD beside the photos). If a
+/// `fox-cull.catalog` already exists there, adopt it; otherwise migrate the
+/// current one. Returns the new catalog path. Portable-friendly: one file the
+/// user can back up or carry between machines.
+#[tauri::command]
+pub fn set_catalog_dir(
+    state: State<'_, AppState>,
+    catalog: State<'_, Catalog>,
+    dir: String,
+) -> Result<String, String> {
+    let dir = PathBuf::from(&dir);
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {}", dir.display()));
+    }
+    let new_path = dir.join("fox-cull.catalog");
+    let old_path = state.catalog_path.lock().clone();
+    if new_path != old_path {
+        if !new_path.exists() {
+            catalog.checkpoint(); // fold WAL into the main file before copying
+            std::fs::copy(&old_path, &new_path).map_err(|e| e.to_string())?;
+        }
+        catalog.reopen(&new_path).map_err(|e| e.to_string())?;
+        *state.catalog_path.lock() = new_path.clone();
+        let mut cfg = crate::config::load(&state.data_root);
+        cfg.catalog_path = Some(new_path.to_string_lossy().to_string());
+        crate::config::save(&state.data_root, &cfg);
+    }
+    Ok(new_path.to_string_lossy().to_string())
+}
+
+/// Move the catalog back to the default app-data location.
+#[tauri::command]
+pub fn reset_catalog_dir(
+    state: State<'_, AppState>,
+    catalog: State<'_, Catalog>,
+) -> Result<String, String> {
+    let def = state.data_root.join("catalog.sqlite");
+    let old_path = state.catalog_path.lock().clone();
+    if def != old_path {
+        if !def.exists() {
+            catalog.checkpoint();
+            std::fs::copy(&old_path, &def).map_err(|e| e.to_string())?;
+        }
+        catalog.reopen(&def).map_err(|e| e.to_string())?;
+        *state.catalog_path.lock() = def.clone();
+        let mut cfg = crate::config::load(&state.data_root);
+        cfg.catalog_path = None;
+        crate::config::save(&state.data_root, &cfg);
+    }
+    Ok(def.to_string_lossy().to_string())
+}
+
+/// Reveal a file in the OS file manager (Explorer / Finder), selected.
+#[tauri::command]
+pub fn reveal(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| e.to_string())
+}
+
+/// Open a file in the user's default application (e.g. a system video player for
+/// HEVC clips the webview can't decode — the Osmo Pocket 3 footage).
+#[tauri::command]
+pub fn open_external(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 /// Whether `dir` is writable — used to detect a read-only mount (e.g. NTFS on

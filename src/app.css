@@ -1,29 +1,31 @@
-/* fox-cull theming. Light is the default (Google-Photos-sober); dark is opt-in.
-   Components reference the tokens below, so theming is just a palette swap. */
+/* fox-cull theming. Dark (warm fox brown) is the default; light is a warm,
+   complementary "paper" palette sharing the same fox-orange accent — NOT the old
+   cold Google-Photos gray. Components reference the tokens below, so theming is
+   just a palette swap. */
 :root,
 :root[data-theme="light"] {
-  --bg: #ffffff;
-  --bg-panel: #f6f8fa; /* side panels / bars */
-  --bg-elev: #ffffff; /* cards, popovers */
-  --bg-hover: #eceff1;
-  --viewport-bg: #e9ebee; /* neutral gray behind photos, like Google Photos */
-  --border: #dce0e3;
-  --text: #1f2329;
-  --text-dim: #5f6368;
-  --text-faint: #9aa0a6;
-  --accent: #e8702a; /* fox orange */
-  --accent-dim: #fbe6d8; /* light orange fill for active chips */
+  --bg: #f7f2ea; /* warm paper */
+  --bg-panel: #efe8db; /* side panels / bars */
+  --bg-elev: #fffaf2; /* cards, popovers */
+  --bg-hover: #e7ddcb;
+  --viewport-bg: #e3dccf; /* warm neutral behind photos */
+  --border: #ddd2bf;
+  --text: #2a2018; /* warm near-black */
+  --text-dim: #6e5f4b;
+  --text-faint: #a3927a;
+  --accent: #e0701f; /* fox orange */
+  --accent-dim: #f6dfc8; /* light orange fill for active chips */
   --accent-on: #ffffff;
-  --reject: #d93838;
-  --pick: #2e9e4f;
-  --star: #e8a417;
-  --shadow: 0 4px 18px rgba(0, 0, 0, 0.14);
+  --reject: #c93a2c;
+  --pick: #2e9447;
+  --star: #d9920c;
+  --shadow: 0 4px 18px rgba(74, 52, 28, 0.18);
 
-  --label-red: #d93838;
-  --label-green: #2e9e4f;
-  --label-yellow: #e8b417;
-  --label-blue: #2f7de0;
-  --label-purple: #8a5be0;
+  --label-red: #c93a2c;
+  --label-green: #2e9447;
+  --label-yellow: #d9a216;
+  --label-blue: #2f6fd0;
+  --label-purple: #7d50d0;
 
   --tree-w: 270px;
   --font: "Inter", "Roboto", system-ui, -apple-system, "Segoe UI", sans-serif;

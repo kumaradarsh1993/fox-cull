@@ -6,12 +6,14 @@
 
   let src = $state<string | null>(null);
   let failed = $state(false);
+  let videoErr = $state(false);
 
   // Re-resolve the large source whenever the active item changes.
   $effect(() => {
     const it = item;
     src = null;
     failed = false;
+    videoErr = false;
     if (!it) return;
     (async () => {
       try {
@@ -29,10 +31,20 @@
   {#if !item}
     <div class="empty">No selection</div>
   {:else if item.kind === "video"}
-    <!-- best-effort: H.264 plays everywhere, HEVC where the OS codec allows -->
-    {#if src}
+    <!-- best-effort: H.264 plays everywhere; HEVC (e.g. Osmo Pocket 3) plays on
+         macOS and on Windows only with the HEVC extension. On a decode failure we
+         fall back to opening the clip in the system player. -->
+    {#if src && !videoErr}
       <!-- svelte-ignore a11y_media_has_caption -->
-      <video {src} controls autoplay></video>
+      <video {src} controls autoplay onerror={() => (videoErr = true)}></video>
+    {:else}
+      <div class="empty vfail">
+        <p class="vt">{item.name}</p>
+        <p>This clip can't play in-app — likely HEVC/H.265 the webview can't decode.</p>
+        <button class="obtn" onclick={() => item && api.openExternal(item.path)}>
+          ▶ Open in system player
+        </button>
+      </div>
     {/if}
   {:else if failed}
     <div class="empty">
@@ -65,4 +77,25 @@
     color: var(--text-faint);
     font-size: 14px;
   }
+  .vfail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    text-align: center;
+    padding: 24px;
+    max-width: 460px;
+  }
+  .vfail .vt { color: var(--text-dim); font-weight: 600; font-size: 15px; margin: 0; }
+  .vfail p { margin: 0; line-height: 1.5; }
+  .obtn {
+    margin-top: 4px;
+    padding: 9px 16px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-on);
+    font-size: 13.5px;
+    font-weight: 600;
+  }
+  .obtn:hover { filter: brightness(1.06); }
 </style>

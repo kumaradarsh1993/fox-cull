@@ -37,16 +37,51 @@ fn apply_orientation(img: DynamicImage, o: u16) -> DynamicImage {
     }
 }
 
-fn load_source(path: &Path, kind: Kind) -> Result<DynamicImage, String> {
+/// DCT-scaled JPEG decode: ask the decoder for the smallest 1/1·1/2·1/4·1/8
+/// scale that still covers `max`, so a 50MP phone JPEG targeted at a 320px
+/// thumbnail does ~1/64th of the IDCT work. Returns `None` for color spaces we
+/// don't fast-path (CMYK/16-bit) or on any decode hiccup, so the caller falls
+/// back to the full `image` decoder for correctness.
+fn decode_jpeg_scaled(bytes: &[u8], max: u32) -> Option<DynamicImage> {
+    use jpeg_decoder::{Decoder, PixelFormat};
+    let mut dec = Decoder::new(std::io::Cursor::new(bytes));
+    dec.scale(max as u16, max as u16).ok()?;
+    let pixels = dec.decode().ok()?;
+    let info = dec.info()?;
+    let (w, h) = (info.width as u32, info.height as u32);
+    match info.pixel_format {
+        PixelFormat::RGB24 => image::RgbImage::from_raw(w, h, pixels).map(DynamicImage::ImageRgb8),
+        PixelFormat::L8 => image::GrayImage::from_raw(w, h, pixels).map(DynamicImage::ImageLuma8),
+        // CMYK32 / L16 are rare (not phone photos) — let the caller full-decode.
+        _ => None,
+    }
+}
+
+fn load_source(path: &Path, kind: Kind, max: u32) -> Result<DynamicImage, String> {
     match kind {
-        // RAW: pull the embedded full-res JPEG preview rather than demosaic.
+        // RAW: pull the embedded full-res JPEG preview rather than demosaic,
+        // and DCT-scale that preview too.
         Kind::Raw => {
             let data = std::fs::read(path).map_err(|e| e.to_string())?;
             let jpg = media::largest_embedded_jpeg(&data)
                 .ok_or_else(|| "no embedded JPEG preview found in RAW file".to_string())?;
+            if let Some(img) = decode_jpeg_scaled(jpg, max) {
+                return Ok(img);
+            }
             image::load_from_memory(jpg).map_err(|e| e.to_string())
         }
-        _ => image::open(path).map_err(|e| e.to_string()),
+        _ => {
+            // Fast path for the dominant case (95% of the user's library is
+            // phone JPEG): read once, DCT-scaled decode from memory.
+            if matches!(media::ext_lower(path).as_str(), "jpg" | "jpeg") {
+                if let Ok(bytes) = std::fs::read(path) {
+                    if let Some(img) = decode_jpeg_scaled(&bytes, max) {
+                        return Ok(img);
+                    }
+                }
+            }
+            image::open(path).map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -72,7 +107,7 @@ pub fn ensure(cache_dir: &Path, path: &Path, kind: Kind, max: u32) -> Result<Pat
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     let t0 = Instant::now();
-    let img = load_source(path, kind)?;
+    let img = load_source(path, kind, max)?;
     let (sw, sh) = (img.width(), img.height());
     let decode_ms = t0.elapsed().as_millis();
     let t1 = Instant::now();

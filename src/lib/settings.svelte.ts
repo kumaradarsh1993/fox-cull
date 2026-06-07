@@ -4,14 +4,16 @@
 import { Store } from "@tauri-apps/plugin-store";
 
 export type Theme = "light" | "dark";
+export type ViewMode = "grid" | "details" | "loupe";
 export type FilmstripPos = "bottom" | "right" | "hidden";
-export type SortBy = "name" | "date" | "type";
+export type SortBy = "name" | "date" | "type" | "size";
 export type SortDir = "asc" | "desc";
 export type TypeFilter = "all" | "image" | "video" | "raw";
 export type DeleteMode = "recycle" | "folder";
 
 export interface AppSettings {
   theme: Theme;
+  viewMode: ViewMode;
   filmstripPos: FilmstripPos;
   treeWidth: number;
   filmstripSize: number;
@@ -26,7 +28,8 @@ export interface AppSettings {
 }
 
 const DEFAULTS: AppSettings = {
-  theme: "light",
+  theme: "dark",
+  viewMode: "grid",
   filmstripPos: "bottom",
   treeWidth: 270,
   filmstripSize: 132,

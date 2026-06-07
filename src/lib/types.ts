@@ -11,15 +11,23 @@ export interface MediaItem {
   kind: "image" | "raw" | "video" | "other";
   ext: string;
   mtime: number;
+  size: number;
   rating: number;
   label: string | null;
   flag: "pick" | "reject" | null;
+  tags: string[];
 }
 
 export interface TrashOutcome {
   deleted: number;
   failed: string[];
   errors: string[];
+}
+
+export interface CatalogInfo {
+  path: string;
+  data_root: string;
+  is_default: boolean;
 }
 
 export interface Filter {

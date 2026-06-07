@@ -9,14 +9,20 @@
     LABEL_VAR,
     type MediaItem,
     type TreeDir,
+    type CatalogInfo,
   } from "$lib/types";
   import TreeNode from "$lib/components/TreeNode.svelte";
   import Thumb from "$lib/components/Thumb.svelte";
   import Loupe from "$lib/components/Loupe.svelte";
   import VirtualGrid from "$lib/components/VirtualGrid.svelte";
   import VirtualStrip from "$lib/components/VirtualStrip.svelte";
+  import DetailsView from "$lib/components/DetailsView.svelte";
 
   type FlagFilter = "all" | "pick" | "reject" | "unflagged";
+  type ViewMode = "grid" | "details" | "loupe";
+
+  // Long edge we cache grid thumbnails at (matches <Thumb size>); used to warm.
+  const THUMB_MAX = 320;
 
   let drives = $state<TreeDir[]>([]);
   let currentDir = $state<string | null>(null);
@@ -24,16 +30,20 @@
   let loading = $state(false);
   let writable = $state(true);
 
-  let mode = $state<"grid" | "loupe">("grid");
   let activeIndex = $state(0);
   let selected = $state<Set<string>>(new Set());
 
   let minRating = $state(0);
   let labelFilter = $state<string | null>(null);
   let flagFilter = $state<FlagFilter>("all");
+  let tagFilter = $state<string | null>(null);
+  let allTags = $state<[string, number][]>([]);
+  let tagInput = $state("");
 
-  let dimLevel = $state(0); // 0 normal · 1 dim chrome · 2 lights out
+  let dimLevel = $state(0); // 0 normal · 1 dim panels · 2 lights out
   let settingsOpen = $state(false);
+  let tagMenuOpen = $state(false);
+  let catInfo = $state<CatalogInfo | null>(null);
   let gridComp = $state<{ scrollToIndex: (i: number) => void } | null>(null);
 
   const HOLD_MS = 850;
@@ -41,14 +51,16 @@
   let holdRAF = 0;
 
   const basename = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
+  let viewMode = $derived(settings.s.viewMode as ViewMode);
 
-  // type → rating/label/flag filters → sort, in one pass.
+  // type → rating/label/flag/tag filters → sort, in one pass.
   let view = $derived.by(() => {
     let arr = items;
     const tf = settings.s.typeFilter;
     if (tf !== "all") arr = arr.filter((i) => i.kind === tf);
     if (minRating > 0) arr = arr.filter((i) => i.rating >= minRating);
     if (labelFilter) arr = arr.filter((i) => i.label === labelFilter);
+    if (tagFilter) arr = arr.filter((i) => i.tags.includes(tagFilter!));
     if (flagFilter === "reject") arr = arr.filter((i) => i.flag === "reject");
     else if (flagFilter === "pick") arr = arr.filter((i) => i.flag === "pick");
     else if (flagFilter === "unflagged") arr = arr.filter((i) => !i.flag);
@@ -58,6 +70,7 @@
     return [...arr].sort((a, b) => {
       let c = 0;
       if (by === "date") c = a.mtime - b.mtime;
+      else if (by === "size") c = a.size - b.size;
       else if (by === "type") c = a.kind.localeCompare(b.kind);
       if (c === 0) c = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
       return c * dir;
@@ -80,6 +93,11 @@
     } catch {
       drives = [];
     }
+    try {
+      catInfo = await api.catalogInfo();
+    } catch {
+      /* */
+    }
     if (settings.s.lastDir) openFolder(settings.s.lastDir);
   });
 
@@ -88,6 +106,14 @@
     if (d) return d.path;
     const m = dir.match(/^[A-Za-z]:[\\/]/);
     return m ? m[0] : dir;
+  }
+
+  async function refreshTags() {
+    try {
+      allTags = await api.listTags();
+    } catch {
+      allTags = [];
+    }
   }
 
   async function openFolder(dir: string) {
@@ -107,12 +133,14 @@
     if (view.length) selected = new Set([view[0].path]);
     loading = false;
     settings.set({ lastDir: dir });
+    // Proactively warm every thumbnail in parallel so scrolling is instant.
+    api.warmThumbnails(items.map((i) => i.path), THUMB_MAX);
+    refreshTags();
   }
 
   async function openFolderPicker() {
     const picked = await api.pickFolder();
     if (picked) {
-      // ensure the drive shows in the tree
       if (!drives.length) {
         try {
           drives = await api.listDrives();
@@ -127,6 +155,10 @@
   async function toggleSub() {
     await settings.set({ includeSub: !settings.s.includeSub });
     if (currentDir) await openFolder(currentDir);
+  }
+
+  function setView(v: ViewMode) {
+    settings.set({ viewMode: v });
   }
 
   function targets(): MediaItem[] {
@@ -149,8 +181,6 @@
     setActiveTo(activeIndex + delta);
   }
 
-  // Single target toggles; multi-selection sets (the intent of X on 500 photos
-  // is "reject them all", not toggle each).
   function rate(r: number) {
     const ts = targets();
     if (ts.length === 1) {
@@ -201,6 +231,27 @@
     }
   }
 
+  // ── tags ──────────────────────────────────────────────────────────────────
+  async function addTagToTargets() {
+    const tag = tagInput.trim();
+    const ts = targets();
+    if (!tag || !ts.length) return;
+    for (const it of ts) if (!it.tags.includes(tag)) it.tags = [...it.tags, tag];
+    tagInput = "";
+    await api.addTag(ts.map((i) => i.path), tag).catch(() => {});
+    refreshTags();
+  }
+  async function removeTagFromActive(tag: string) {
+    if (!active) return;
+    active.tags = active.tags.filter((t) => t !== tag);
+    await api.removeTag([active.path], tag).catch(() => {});
+    refreshTags();
+  }
+  function pickTagFilter(t: string | null) {
+    tagFilter = t;
+    tagMenuOpen = false;
+  }
+
   function selectAllFiltered() {
     selected = new Set(view.map((i) => i.path));
   }
@@ -248,14 +299,13 @@
     const paths = await api.listRejected();
     if (!paths.length) return;
     let dest = settings.s.rejectFolder;
-    if (settings.s.deleteMode === "folder") {
-      if (!dest) {
-        dest = await api.pickFolder();
-        if (!dest) return;
-        await settings.set({ rejectFolder: dest });
-      }
-    }
-    await api.disposeRejected(paths, settings.s.deleteMode, settings.s.deleteMode === "folder" ? dest : null);
+    // "folder" mode with no explicit folder → backend auto-targets a per-drive
+    // "_FoxCull Recycle Bin" mirroring the structure. No prompt needed.
+    await api.disposeRejected(
+      paths,
+      settings.s.deleteMode,
+      settings.s.deleteMode === "folder" ? dest : null,
+    );
     if (currentDir) await openFolder(currentDir); // silent refresh
   }
 
@@ -282,7 +332,7 @@
     const startS = settings.s.filmstripSize;
     const move = (ev: PointerEvent) => {
       const d = right ? start - ev.clientX : start - ev.clientY;
-      settings.s.filmstripSize = Math.max(84, Math.min(460, startS + d));
+      settings.s.filmstripSize = Math.max(84, Math.min(520, startS + d));
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
@@ -297,21 +347,43 @@
     const f = await api.pickFolder();
     if (f) await settings.set({ rejectFolder: f });
   }
+  async function moveCatalog() {
+    const d = await api.pickFolder();
+    if (!d) return;
+    try {
+      await api.setCatalogDir(d);
+      catInfo = await api.catalogInfo();
+      if (currentDir) await openFolder(currentDir);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  async function resetCatalog() {
+    try {
+      await api.resetCatalogDir();
+      catInfo = await api.catalogInfo();
+      if (currentDir) await openFolder(currentDir);
+    } catch (e) {
+      console.error(e);
+    }
+  }
 
   function onkeydown(e: KeyboardEvent) {
     const t = e.target as HTMLElement;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
     if (e.key === "ArrowRight" || e.key === "ArrowDown") { move(1); e.preventDefault(); return; }
     if (e.key === "ArrowLeft" || e.key === "ArrowUp") { move(-1); e.preventDefault(); return; }
-    if (e.key === "Enter") { mode = mode === "grid" ? "loupe" : "grid"; e.preventDefault(); return; }
+    if (e.key === "Enter") { setView(viewMode === "loupe" ? "grid" : "loupe"); e.preventDefault(); return; }
     if (e.key === "Escape") {
       if (dimLevel > 0) dimLevel = 0;
-      else if (mode === "loupe") mode = "grid";
+      else if (viewMode === "loupe") setView("grid");
       else selected = active ? new Set([active.path]) : new Set();
       return;
     }
     const k = e.key.toLowerCase();
     if (k === "l") { dimLevel = (dimLevel + 1) % 3; return; }
+    if (k === "g") { setView("grid"); return; }
+    if (k === "d") { setView("details"); return; }
     if (e.key >= "1" && e.key <= "5") { rate(Number(e.key)); return; }
     if (e.key === "`") { rate(0); return; }
     if (e.key in LABEL_BY_DIGIT) { label(LABEL_BY_DIGIT[e.key]); return; }
@@ -330,7 +402,7 @@
     class:selected={selected.has(item.path)}
     class:reject={item.flag === "reject"}
     onclick={(e) => gridCellClick(e, i)}
-    ondblclick={() => { setActiveTo(i); mode = "loupe"; }}
+    ondblclick={() => { setActiveTo(i); setView("loupe"); }}
   >
     <Thumb {item} size={320} />
     <span class="ov">
@@ -338,6 +410,7 @@
       {#if item.flag === "reject"}<span class="fl x">✕</span>{/if}
       {#if item.flag === "pick"}<span class="fl pick">✓</span>{/if}
       {#if item.rating > 0}<span class="stars">{"★".repeat(item.rating)}</span>{/if}
+      {#if item.tags.length}<span class="tagdot" title={item.tags.join(", ")}>🏷</span>{/if}
     </span>
   </button>
 {/snippet}
@@ -348,7 +421,7 @@
     class:active={i === activeIndex}
     class:reject={item.flag === "reject"}
     onclick={() => setActiveTo(i)}
-    ondblclick={() => { setActiveTo(i); mode = "loupe"; }}
+    ondblclick={() => { setActiveTo(i); setView("loupe"); }}
     title={item.name}
   >
     <Thumb {item} size={320} />
@@ -387,11 +460,19 @@
 
     <!-- top bar -->
     <div class="bar">
+      <!-- view mode -->
+      <div class="seg modes" title="View (G grid · D details · Enter focus)">
+        <button class="chip" class:on={viewMode === "grid"} onclick={() => setView("grid")}>▦ Grid</button>
+        <button class="chip" class:on={viewMode === "details"} onclick={() => setView("details")}>≣ Details</button>
+        <button class="chip" class:on={viewMode === "loupe"} onclick={() => setView("loupe")}>▣ Focus</button>
+      </div>
+
       <div class="grp">
         <select class="sel" bind:value={settings.s.sortBy} onchange={() => settings.set({ sortBy: settings.s.sortBy })}>
           <option value="name">Name</option>
           <option value="date">Date</option>
           <option value="type">Type</option>
+          <option value="size">Size</option>
         </select>
         <button class="ico" title="Sort direction" onclick={() => settings.set({ sortDir: settings.s.sortDir === "asc" ? "desc" : "asc" })}>
           {settings.s.sortDir === "asc" ? "↑" : "↓"}
@@ -424,9 +505,30 @@
         {/each}
       </div>
 
+      <!-- tags filter -->
+      <div class="grp tagwrap">
+        <button class="chip" class:on={tagFilter !== null} onclick={() => (tagMenuOpen = !tagMenuOpen)} title="Filter by tag">
+          🏷 {tagFilter ?? "Tags"}
+        </button>
+        {#if tagMenuOpen}
+          <div class="tagmenu">
+            <button class="tagrow" class:on={tagFilter === null} onclick={() => pickTagFilter(null)}>Any tag</button>
+            {#if allTags.length}
+              {#each allTags as [t, n]}
+                <button class="tagrow" class:on={tagFilter === t} onclick={() => pickTagFilter(t)}>
+                  <span>{t}</span><span class="cnt">{n}</span>
+                </button>
+              {/each}
+            {:else}
+              <p class="tagempty">No tags yet. Add one to the selected photo below.</p>
+            {/if}
+          </div>
+        {/if}
+      </div>
+
       <button class="chip" class:on={settings.s.includeSub} onclick={toggleSub} title="Include photos from subfolders">⊞ Sub</button>
 
-      {#if mode === "grid"}
+      {#if viewMode === "grid"}
         <div class="grp zoom" title="Thumbnail size">
           <span class="mini">▦</span>
           <input type="range" min="110" max="360" bind:value={settings.s.gridSize} onchange={() => settings.set({ gridSize: settings.s.gridSize })} />
@@ -460,8 +562,8 @@
       <div class="pop">
         <div class="row"><span>Theme</span>
           <div class="seg">
-            <button class="chip" class:on={settings.s.theme === "light"} onclick={() => settings.set({ theme: "light" })}>Light</button>
             <button class="chip" class:on={settings.s.theme === "dark"} onclick={() => settings.set({ theme: "dark" })}>Dark</button>
+            <button class="chip" class:on={settings.s.theme === "light"} onclick={() => settings.set({ theme: "light" })}>Light</button>
           </div>
         </div>
         <div class="row"><span>Filmstrip</span>
@@ -479,17 +581,29 @@
         </div>
         {#if settings.s.deleteMode === "folder"}
           <div class="row sub">
-            <span class="path" title={settings.s.rejectFolder ?? ""}>{settings.s.rejectFolder ? basename(settings.s.rejectFolder) : "(no folder set)"}</span>
-            <button class="btn sm" onclick={chooseRejectFolder}>Choose…</button>
+            <span class="path" title={settings.s.rejectFolder ?? ""}>{settings.s.rejectFolder ? basename(settings.s.rejectFolder) : "Auto: _FoxCull Recycle Bin (drive root)"}</span>
+            <div class="seg">
+              <button class="btn sm" onclick={chooseRejectFolder}>Choose…</button>
+              {#if settings.s.rejectFolder}<button class="btn sm" onclick={() => settings.set({ rejectFolder: null })}>Auto</button>{/if}
+            </div>
           </div>
         {/if}
-        <div class="row hintrow">Press <kbd>L</kbd> for dim / lights-out mode.</div>
+        <div class="row"><span>Catalog</span>
+          <div class="seg">
+            <button class="btn sm" onclick={moveCatalog}>Move…</button>
+            {#if catInfo && !catInfo.is_default}<button class="btn sm" onclick={resetCatalog}>Default</button>{/if}
+          </div>
+        </div>
+        {#if catInfo}
+          <div class="row sub"><span class="path" title={catInfo.path}>{catInfo.path}</span></div>
+        {/if}
+        <div class="row hintrow">Press <kbd>L</kbd> for dim / lights-out · <kbd>G</kbd> grid · <kbd>D</kbd> details.</div>
       </div>
     {/if}
 
     <!-- body: viewport (+ optional right filmstrip) -->
     <div class="body">
-      <div class="viewport">
+      <div class="viewport" class:lit={dimLevel > 0}>
         {#if loading}
           <div class="welcome"><p>Scanning {currentDir ? basename(currentDir) : ""}…</p></div>
         {:else if !currentDir}
@@ -499,8 +613,16 @@
           </div>
         {:else if view.length === 0}
           <div class="welcome"><p>Nothing here matches the current filters.</p></div>
-        {:else if mode === "loupe"}
+        {:else if viewMode === "loupe"}
           <Loupe item={active} />
+        {:else if viewMode === "details"}
+          <DetailsView
+            items={view}
+            {activeIndex}
+            {selected}
+            onrowclick={gridCellClick}
+            onrowdblclick={(i) => { setActiveTo(i); setView("loupe"); }}
+          />
         {:else}
           <VirtualGrid items={view} {activeIndex} cellMin={settings.s.gridSize} bind:this={gridComp} cell={gridCell} />
         {/if}
@@ -529,19 +651,39 @@
         {/each}
         <button class="btn sm" class:on={active.flag === "pick"} onclick={() => flag("pick")}>Pick</button>
         <button class="btn sm danger" class:on={active.flag === "reject"} onclick={() => flag("reject")}>Reject</button>
+
+        <!-- tags -->
+        <div class="tags">
+          {#each active.tags as t}
+            <span class="tag">{t}<button class="tagx" onclick={() => removeTagFromActive(t)} aria-label="Remove tag">×</button></span>
+          {/each}
+          <input
+            class="taginput"
+            placeholder="+ tag"
+            bind:value={tagInput}
+            onkeydown={(e) => { if (e.key === "Enter") addTagToTargets(); }}
+          />
+        </div>
+
         <span class="spacer"></span>
+        <button class="ico" title="Reveal in file manager" onclick={() => active && api.reveal(active.path)}>⤴</button>
         <span class="counts">✓ {pickCount} · ✕ {rejectedCount}</span>
       </div>
     {/if}
 
     <!-- bottom filmstrip -->
     {#if settings.s.filmstripPos === "bottom" && view.length}
-      <div class="hsplit" role="separator" tabindex="-1" onpointerdown={startStripResize}></div>
+      <div class="hsplit" role="separator" tabindex="-1" onpointerdown={startStripResize} title="Drag to resize"><span class="grip"></span></div>
       <div class="bstrip" style="height:{settings.s.filmstripSize}px">
         <VirtualStrip items={view} {activeIndex} orientation="h" cellSize={stripCell} cell={stripCellSnip} />
       </div>
     {/if}
   </main>
+
+  <!-- dim / lights-out scrim: darkens all chrome, the photo viewport stays lit -->
+  {#if dimLevel > 0}
+    <button class="scrim" aria-label="Exit dim mode" onclick={() => (dimLevel = 0)}></button>
+  {/if}
 </div>
 
 <style>
@@ -554,8 +696,10 @@
 
   .vsplit { flex: 0 0 5px; cursor: col-resize; background: transparent; }
   .vsplit:hover { background: color-mix(in srgb, var(--accent) 40%, transparent); }
-  .hsplit { flex: 0 0 5px; cursor: row-resize; }
-  .hsplit:hover { background: color-mix(in srgb, var(--accent) 40%, transparent); }
+  .hsplit { flex: 0 0 8px; cursor: row-resize; display: flex; align-items: center; justify-content: center; background: var(--bg-panel); border-top: 1px solid var(--border); }
+  .hsplit .grip { width: 46px; height: 3px; border-radius: 3px; background: var(--text-faint); opacity: 0.4; }
+  .hsplit:hover { background: color-mix(in srgb, var(--accent) 22%, var(--bg-panel)); }
+  .hsplit:hover .grip { opacity: 0.9; background: var(--accent); }
 
   .center { display: flex; flex-direction: column; flex: 1; min-width: 0; height: 100vh; }
 
@@ -563,12 +707,13 @@
   .grp { display: flex; align-items: center; gap: 4px; }
   .seg { display: flex; align-items: center; gap: 3px; }
   .seg.flags { gap: 2px; }
+  .seg.modes { gap: 2px; padding: 2px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; }
   .spacer { flex: 1; }
   .sel { background: var(--bg-elev); color: var(--text); border: 1px solid var(--border); border-radius: 7px; padding: 4px 6px; font-size: 12.5px; }
   .ico { width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--border); background: var(--bg-elev); font-size: 14px; line-height: 1; }
   .ico:hover { background: var(--bg-hover); }
   .ico.on { border-color: var(--accent); color: var(--accent); }
-  .chip { padding: 4px 9px; border-radius: 6px; font-size: 12px; color: var(--text-dim); border: 1px solid transparent; }
+  .chip { padding: 4px 9px; border-radius: 6px; font-size: 12px; color: var(--text-dim); border: 1px solid transparent; white-space: nowrap; }
   .chip:hover { background: var(--bg-hover); }
   .chip.on { background: var(--accent); color: var(--accent-on); }
   .chip.rej.on { background: var(--reject); border-color: var(--reject); }
@@ -584,22 +729,32 @@
   .zoom input { width: 90px; accent-color: var(--accent); }
   .btn.sm { padding: 5px 10px; border-radius: 7px; font-size: 12.5px; }
 
+  .tagwrap { position: relative; }
+  .tagmenu { position: absolute; top: 32px; left: 0; z-index: 30; min-width: 180px; max-height: 320px; overflow-y: auto; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 9px; box-shadow: var(--shadow); padding: 5px; }
+  .tagrow { display: flex; justify-content: space-between; gap: 10px; width: 100%; text-align: left; padding: 6px 9px; border-radius: 6px; font-size: 12.5px; color: var(--text); }
+  .tagrow:hover { background: var(--bg-hover); }
+  .tagrow.on { background: var(--accent); color: var(--accent-on); }
+  .tagrow .cnt { color: var(--text-faint); }
+  .tagrow.on .cnt { color: var(--accent-on); }
+  .tagempty { padding: 8px 9px; color: var(--text-faint); font-size: 12px; margin: 0; }
+
   .hold { position: relative; overflow: hidden; }
   .hold-fill { position: absolute; left: 0; top: 0; bottom: 0; background: color-mix(in srgb, var(--reject) 35%, transparent); }
   .hold-lbl { position: relative; z-index: 1; }
   .hold em { font-style: normal; opacity: 0.6; font-size: 11px; }
 
-  .pop { position: absolute; right: 10px; top: 46px; z-index: 30; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 12px; width: 320px; display: flex; flex-direction: column; gap: 10px; }
+  .pop { position: absolute; right: 10px; top: 46px; z-index: 30; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 12px; width: 340px; display: flex; flex-direction: column; gap: 10px; }
   .pop .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
   .pop .row.sub { padding-left: 6px; }
-  .pop .path { color: var(--text-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pop .path { color: var(--text-dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pop .hintrow { color: var(--text-faint); font-size: 12px; }
   kbd { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; font-size: 11px; }
 
   .body { flex: 1; display: flex; min-height: 0; }
-  .viewport { flex: 1; min-width: 0; background: var(--viewport-bg); overflow: hidden; }
+  .viewport { flex: 1; min-width: 0; background: var(--viewport-bg); overflow: hidden; display: flex; flex-direction: column; }
+  .viewport.lit { position: relative; z-index: 50; }
   .rstrip { flex: 0 0 auto; border-left: 1px solid var(--border); }
-  .bstrip { flex: 0 0 auto; border-top: 1px solid var(--border); }
+  .bstrip { flex: 0 0 auto; }
 
   .welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--text-dim); text-align: center; padding: 24px; }
   .welcome h1 { font-size: 28px; margin: 0; }
@@ -614,6 +769,7 @@
   .fl.x { color: var(--reject); }
   .fl.pick { color: var(--pick); }
   .stars { position: absolute; bottom: 4px; left: 6px; color: var(--star); font-size: 13px; text-shadow: 0 1px 3px rgba(0,0,0,0.6); }
+  .tagdot { position: absolute; bottom: 4px; right: 6px; font-size: 11px; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6)); }
 
   .scell { position: relative; width: 100%; height: 100%; border: 2px solid transparent; border-radius: 5px; overflow: hidden; padding: 0; background: var(--viewport-bg); }
   .scell.active { border-color: var(--accent); }
@@ -624,28 +780,21 @@
   .s-pick { position: absolute; top: 2px; left: 4px; color: var(--pick); font-weight: 700; text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
 
   .info { display: flex; align-items: center; gap: 10px; padding: 5px 12px; border-top: 1px solid var(--border); background: var(--bg-panel); }
-  .info .name { font-weight: 600; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .info .name { font-weight: 600; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .info .meta { color: var(--text-faint); font-size: 12px; }
   .info .counts { color: var(--text-faint); font-size: 12.5px; }
   .rate { display: flex; }
   .star { color: var(--text-faint); font-size: 16px; }
   .star.on { color: var(--star); }
 
-  /* dim / lights-out mode */
-  .app[data-dim="1"] .tree,
-  .app[data-dim="1"] .bar,
-  .app[data-dim="1"] .info,
-  .app[data-dim="1"] .bstrip,
-  .app[data-dim="1"] .rstrip,
-  .app[data-dim="1"] .vsplit,
-  .app[data-dim="1"] .hsplit { opacity: 0.12; transition: opacity 0.15s; }
-  .app[data-dim="1"] .tree:hover,
-  .app[data-dim="1"] .bar:hover { opacity: 1; }
-  .app[data-dim="2"] .tree,
-  .app[data-dim="2"] .bar,
-  .app[data-dim="2"] .info,
-  .app[data-dim="2"] .bstrip,
-  .app[data-dim="2"] .rstrip,
-  .app[data-dim="2"] .vsplit,
-  .app[data-dim="2"] .hsplit { display: none; }
+  .tags { display: flex; align-items: center; gap: 5px; flex-wrap: nowrap; overflow: hidden; }
+  .tag { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 11px; padding: 1px 4px 1px 8px; color: var(--text-dim); white-space: nowrap; }
+  .tagx { font-size: 13px; line-height: 1; color: var(--text-faint); padding: 0 2px; }
+  .tagx:hover { color: var(--reject); }
+  .taginput { width: 70px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 11px; padding: 2px 8px; font-size: 11.5px; color: var(--text); }
+  .taginput:focus { outline: none; border-color: var(--accent); width: 110px; }
+
+  /* dim / lights-out scrim */
+  .scrim { position: fixed; inset: 0; z-index: 40; border: none; padding: 0; cursor: pointer; background: rgba(0,0,0,0.55); transition: background 0.18s; }
+  .app[data-dim="2"] .scrim { background: rgba(0,0,0,0.93); }
 </style>

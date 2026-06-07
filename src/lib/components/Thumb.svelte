@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { api } from "$lib/api";
   import { loadThumb } from "$lib/thumbnail-loader";
   import type { MediaItem } from "$lib/types";
 
@@ -11,6 +10,10 @@
   let isVideo = $derived(item.kind === "video");
 
   // Images/RAW: cached, orientation-baked thumbnail from Rust.
+  // Videos render a lightweight film placeholder — we deliberately DON'T mount a
+  // live <video> per cell (it forced the webview to decode every clip on scroll,
+  // which was janky and showed blank frames for HEVC, e.g. the Osmo footage).
+  // Real poster frames are a server-side (ffmpeg) job, tracked for later.
   $effect(() => {
     const it = item;
     src = null;
@@ -26,32 +29,14 @@
       alive = false;
     };
   });
-
-  // Video poster: show a real frame by seeking a muted <video> a touch past 0.
-  // No canvas (avoids cross-origin taint); works for any codec the webview
-  // can decode (H.264 everywhere, HEVC where the OS supports it).
-  function seekToFrame(e: Event) {
-    const v = e.currentTarget as HTMLVideoElement;
-    try {
-      v.currentTime = Math.min(0.5, (v.duration || 1) / 2);
-    } catch {
-      /* ignore */
-    }
-  }
 </script>
 
 <div class="thumb">
   {#if isVideo}
-    <!-- svelte-ignore a11y_media_has_caption -->
-    <video
-      class="media"
-      src={api.fileSrc(item.path)}
-      muted
-      playsinline
-      preload="metadata"
-      onloadeddata={seekToFrame}
-    ></video>
-    <span class="badge">▶</span>
+    <div class="ph vid">
+      <span class="film">▶</span>
+      <span class="vext">{item.ext.toUpperCase()}</span>
+    </div>
   {:else if src}
     <img class="media" {src} alt={item.name} draggable="false" />
   {:else if failed}
@@ -85,6 +70,30 @@
     letter-spacing: 0.5px;
   }
   .ph.dim { opacity: 0.4; font-size: 18px; }
+  .ph.vid {
+    flex-direction: column;
+    gap: 5px;
+    background: repeating-linear-gradient(
+      45deg,
+      color-mix(in srgb, var(--text-faint) 8%, var(--viewport-bg)),
+      color-mix(in srgb, var(--text-faint) 8%, var(--viewport-bg)) 10px,
+      color-mix(in srgb, var(--text-faint) 14%, var(--viewport-bg)) 10px,
+      color-mix(in srgb, var(--text-faint) 14%, var(--viewport-bg)) 20px
+    );
+  }
+  .ph.vid .film {
+    font-size: 20px;
+    color: var(--text);
+    background: color-mix(in srgb, var(--text) 14%, transparent);
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-left: 3px;
+  }
+  .ph.vid .vext { font-size: 10px; font-weight: 700; color: var(--text-dim); letter-spacing: 0.5px; }
   .badge {
     position: absolute;
     bottom: 4px;

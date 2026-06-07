@@ -1,6 +1,6 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import type { TreeDir, MediaItem, TrashOutcome } from "./types";
+import type { TreeDir, MediaItem, TrashOutcome, CatalogInfo } from "./types";
 
 export const api = {
   setLibraryRoot: (root: string) => invoke<void>("set_library_root", { root }),
@@ -10,6 +10,9 @@ export const api = {
     invoke<MediaItem[]>("list_folder_media", { dir, recursive }),
   thumbnail: (path: string, max: number) =>
     invoke<string>("thumbnail", { path, max }),
+  /** Fire-and-forget: pre-warm the whole folder's thumbnails in parallel. */
+  warmThumbnails: (paths: string[], max: number) =>
+    invoke<void>("warm_thumbnails", { paths, max }).catch(() => {}),
   loupeSrc: (path: string) => invoke<string>("loupe_src", { path }),
   setRating: (path: string, rating: number) =>
     invoke<void>("set_rating", { path, rating }),
@@ -23,9 +26,20 @@ export const api = {
     invoke<void>("set_label_many", { paths, label }),
   setFlagMany: (paths: string[], flag: string | null) =>
     invoke<void>("set_flag_many", { paths, flag }),
+  addTag: (paths: string[], tag: string) =>
+    invoke<void>("add_tag", { paths, tag }),
+  removeTag: (paths: string[], tag: string) =>
+    invoke<void>("remove_tag", { paths, tag }),
+  listTags: () => invoke<[string, number][]>("list_tags"),
   listRejected: () => invoke<string[]>("list_rejected"),
   disposeRejected: (paths: string[], mode: string, dest: string | null) =>
     invoke<TrashOutcome>("dispose_rejected", { paths, mode, dest }),
+  catalogInfo: () => invoke<CatalogInfo>("catalog_info"),
+  setCatalogDir: (dir: string) => invoke<string>("set_catalog_dir", { dir }),
+  resetCatalogDir: () => invoke<string>("reset_catalog_dir"),
+  reveal: (path: string) => invoke<void>("reveal", { path }).catch(() => {}),
+  openExternal: (path: string) =>
+    invoke<void>("open_external", { path }).catch(() => {}),
   folderWritable: (dir: string) => invoke<boolean>("folder_writable", { dir }),
   logEvent: (msg: string) => invoke<void>("log_event", { msg }).catch(() => {}),
 

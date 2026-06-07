@@ -23,14 +23,26 @@ labels — and does just that one job, fast.
 - **Browse any folder in place** — point it at a drive or folder and it shows
   the whole tree. Pick a folder and you see every photo inside it *and* its
   subfolders, all at once.
-- **Rate and flag at speed** — star ratings (1–5), color labels, and a
-  keep/reject flag, all from the keyboard.
-- **Big, clean preview** with a Lightroom-style film-strip along the bottom.
+- **Three ways to look** — **Grid** (adjustable thumbnail size), **Details**
+  (name / type / size / date list, like a file explorer), and **Focus** (one
+  big photo) — switch any time, top-left.
+- **Rate, flag, and tag at speed** — star ratings (1–5), color labels, a
+  keep/reject flag, and your own free-form **tags** (e.g. "Diwali"), all from
+  the keyboard. Filter by any of them.
+- **Big, clean preview** with a Lightroom-style film-strip (bottom, side, or
+  off — and drag to resize it).
+- **Dim / lights-out focus mode** (`L`) darkens everything but the photo.
 - **Photos always upright** — no more sideways portrait shots from your phone.
+- **Fast on huge phone JPEGs** — thumbnails decode at reduced scale and the
+  whole folder pre-loads in the background, so scrolling stays smooth.
 - **Handles RAW** — Nikon `.NEF` and other RAW files preview instantly.
-- **Videos too** — phone clips play right in the app (best-effort).
+- **Videos too** — H.264 clips play in the app; HEVC clips (e.g. DJI Osmo
+  Pocket 3) open in your system player in one click.
 - **Filter, then bulk-reject** — e.g. show everything below 3 stars, select
   all, reject, then sweep the rejects to the Recycle Bin in one go.
+- **Portable & backup-friendly** — your ratings live in one catalog file you
+  can move onto your SSD next to the photos and carry between machines. The app
+  itself can run portable from a USB stick / SSD too (see below).
 
 ## Download & install
 
@@ -43,6 +55,11 @@ Grab the latest build from the **[Releases page](../../releases)**:
   says it's "damaged", open Terminal and run
   `xattr -dr com.apple.quarantine /Applications/fox-cull.app`.)
 - **Linux** — `.AppImage` (portable) or `.deb`.
+- **Windows portable** — `fox-cull_*_x64_portable.zip`. Unzip anywhere (e.g.
+  onto your SSD). It contains `fox-cull.exe` and a `fox-cull-data` folder; keep
+  them together and the app stores its catalog, cache and settings in that
+  folder instead of in Windows AppData — so the whole app travels with you.
+  (Needs the Microsoft WebView2 runtime, which ships with Windows 10/11.)
 
 ## How to cull
 
@@ -53,7 +70,9 @@ Grab the latest build from the **[Releases page](../../releases)**:
 | Key | Action |
 |---|---|
 | `←` / `→` | Previous / next photo |
-| `Enter` | Toggle big "loupe" view |
+| `Enter` | Toggle big **Focus** view |
+| `G` / `D` | **Grid** / **Details** view |
+| `L` | Dim → lights-out → normal (focus mode) |
 | `1`–`5` | Star rating |
 | `` ` `` | Clear rating |
 | `6` `7` `8` `9` `0` | Color label (blue / purple / red / green / yellow) |
@@ -61,19 +80,24 @@ Grab the latest build from the **[Releases page](../../releases)**:
 | `P` | Pick (keep) |
 | `U` | Clear everything on this photo |
 
-4. Use the **filter bar** to narrow down (e.g. only rejected, or 3+ stars),
-   **Select all**, and **Reject** them in bulk.
-5. When you're ready, hit **Delete rejected…** — the rejects move to your
-   Recycle Bin / Trash (recoverable), freeing up space.
+4. Use the **filter bar** to narrow down (e.g. only rejected, 3+ stars, or a
+   tag), **Select all**, and **Reject** them in bulk. Add a tag to the selected
+   photo(s) by typing in the **+ tag** box in the bottom info bar.
+5. When you're ready, **hold the Delete button** — the rejects move to your
+   Recycle Bin / Trash (recoverable), freeing up space. Prefer a folder? Switch
+   "On delete" to **Move to folder** in Settings (⚙): rejects go to a
+   `_FoxCull Recycle Bin` at the drive root, keeping their folder structure.
 
 Tip: the **⊞ Subfolders** button (on by default) controls whether a folder
 shows photos from its subfolders too.
 
 ## Good to know
 
-- **Ratings live in fox-cull only.** They're stored in the app's own database,
-  not written into your photo files, so they won't show up in other apps (and
-  won't touch your originals).
+- **Ratings live in fox-cull only.** They're stored in the app's own catalog
+  file, not written into your photo files, so they won't show up in other apps
+  (and won't touch your originals). You can **move that catalog** anywhere
+  (Settings → Catalog → Move…) — e.g. onto your SSD beside the photos — so it
+  backs up with them and follows you to another computer.
 - **Read-only drives:** if a drive is mounted read-only (e.g. an NTFS SSD on a
   Mac without a write driver), culling and rating still work — only the final
   delete sweep is disabled, with a note explaining why.

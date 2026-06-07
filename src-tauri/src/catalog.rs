@@ -5,6 +5,7 @@
 //! letter / mount point on another machine (Alienware `E:\` vs Mac
 //! `/Volumes/...`). Nothing here is written next to the user's originals.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,6 +34,28 @@ fn now() -> i64 {
 
 impl Catalog {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
+        Ok(Self {
+            conn: Mutex::new(Self::open_conn(path)?),
+        })
+    }
+
+    /// Re-point the catalog at a different file (the user moved it onto their
+    /// SSD, or back to the default). The in-flight connection is swapped under
+    /// the lock; callers migrate/copy the file first if needed.
+    pub fn reopen(&self, path: &Path) -> rusqlite::Result<()> {
+        let conn = Self::open_conn(path)?;
+        *self.conn.lock() = conn;
+        Ok(())
+    }
+
+    /// Fold the WAL back into the main file so a plain file-copy relocation is
+    /// complete (no orphaned `-wal`/`-shm`).
+    pub fn checkpoint(&self) {
+        let conn = self.conn.lock();
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+
+    fn open_conn(path: &Path) -> rusqlite::Result<Connection> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         conn.execute(
@@ -49,9 +72,18 @@ impl Catalog {
             "CREATE INDEX IF NOT EXISTS idx_decisions_flag ON decisions(flag)",
             [],
         )?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        // Free-form per-file tags (many-to-many), keyed by the same rel-path so
+        // the catalog stays portable. Cull-relevant for "Diwali across S23U/2026".
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS tags (
+                rel TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (rel, tag)
+            )",
+            [],
+        )?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag)", [])?;
+        Ok(conn)
     }
 
     /// Fetch every decision at or under a rel-path prefix in a SINGLE query.
@@ -178,6 +210,82 @@ impl Catalog {
         let conn = self.conn.lock();
         for rel in rels {
             let _ = conn.execute("DELETE FROM decisions WHERE rel = ?1", params![rel]);
+            let _ = conn.execute("DELETE FROM tags WHERE rel = ?1", params![rel]);
         }
+    }
+
+    // ── tags ────────────────────────────────────────────────────────────────
+
+    /// Every tag at or under a rel-prefix, grouped by rel-path, in one query.
+    pub fn tags_under(&self, prefix: &str) -> HashMap<String, Vec<String>> {
+        let conn = self.conn.lock();
+        let (sql, bind): (&str, Option<String>) = if prefix.is_empty() {
+            ("SELECT rel, tag FROM tags ORDER BY tag", None)
+        } else {
+            (
+                "SELECT rel, tag FROM tags WHERE rel = ?1 OR rel LIKE ?2 ORDER BY tag",
+                Some(format!("{prefix}/%")),
+            )
+        };
+        let mut stmt = match conn.prepare(sql) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+        let map = |r: &rusqlite::Row<'_>| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?));
+        let rows = match &bind {
+            None => stmt.query_map([], map),
+            Some(like) => stmt.query_map(params![prefix, like], map),
+        };
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        if let Ok(it) = rows {
+            for (rel, tag) in it.flatten() {
+                out.entry(rel).or_default().push(tag);
+            }
+        }
+        out
+    }
+
+    /// Distinct tag names across the whole catalog (for the filter UI), with usage
+    /// counts, most-used first.
+    pub fn all_tags(&self) -> Vec<(String, i64)> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn
+            .prepare("SELECT tag, COUNT(*) FROM tags GROUP BY tag ORDER BY COUNT(*) DESC, tag")
+        {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)));
+        match rows {
+            Ok(it) => it.flatten().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Add `tag` to many rel-paths in one transaction (idempotent).
+    pub fn add_tag_many(&self, rels: &[String], tag: &str) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt =
+                tx.prepare("INSERT OR IGNORE INTO tags(rel, tag) VALUES(?1, ?2)")?;
+            for rel in rels {
+                stmt.execute(params![rel, tag])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Remove `tag` from many rel-paths in one transaction.
+    pub fn remove_tag_many(&self, rels: &[String], tag: &str) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare("DELETE FROM tags WHERE rel = ?1 AND tag = ?2")?;
+            for rel in rels {
+                stmt.execute(params![rel, tag])?;
+            }
+        }
+        tx.commit()
     }
 }
