@@ -4,6 +4,7 @@ mod config;
 mod log;
 mod media;
 mod thumbs;
+mod video;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -61,8 +62,6 @@ pub fn run() {
             // read-only mount), or beside the exe in portable mode.
             let data_dir = resolve_data_root(app)?;
             std::fs::create_dir_all(&data_dir)?;
-            let cache_dir = data_dir.join("thumbs");
-            std::fs::create_dir_all(&cache_dir)?;
 
             log::init(data_dir.join("fox-cull.log"));
 
@@ -77,6 +76,12 @@ pub fn run() {
                 .filter(|p| p.parent().map(|par| par.is_dir()).unwrap_or(false))
                 .unwrap_or_else(|| default_catalog.clone());
 
+            // The thumbnail/poster cache lives next to the catalog, so when the
+            // catalog is on the SSD the cache is too (generated once, shared
+            // across machines). Falls back to app-data for the default catalog.
+            let cache_dir = commands::cache_dir_for(&catalog_path);
+            std::fs::create_dir_all(&cache_dir)?;
+
             let catalog = Catalog::open(&catalog_path)
                 .map_err(|e| format!("failed to open catalog: {e}"))?;
             app.manage(catalog);
@@ -87,9 +92,10 @@ pub fn run() {
 
             app.manage(AppState {
                 root: Mutex::new(None),
-                cache_dir,
+                cache_dir: Mutex::new(cache_dir),
                 data_root: data_dir,
                 catalog_path: Mutex::new(catalog_path),
+                ffmpeg: video::ffmpeg_path(),
                 warm_gen: Arc::new(AtomicU64::new(0)),
             });
             Ok(())
@@ -102,6 +108,7 @@ pub fn run() {
             commands::thumbnail,
             commands::warm_thumbnails,
             commands::loupe_src,
+            commands::video_poster,
             commands::set_rating,
             commands::set_label,
             commands::set_flag,

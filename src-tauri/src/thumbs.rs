@@ -12,6 +12,22 @@ use image::DynamicImage;
 
 use crate::media::{self, Kind};
 
+/// The cache file path for `path` at long-edge `max` (whether or not it exists
+/// yet). Used both by `ensure` and by cleanup-on-delete to find the exact file
+/// to remove. Reads the file's metadata, so call it while the file still exists.
+pub fn cache_path(cache_dir: &Path, path: &Path, max: u32) -> Option<PathBuf> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let abs = path.to_string_lossy().to_string();
+    let o = media::orientation(path);
+    Some(cache_dir.join(format!("{}.jpg", cache_key(&abs, mtime, meta.len(), max, o))))
+}
+
 fn cache_key(abs: &str, mtime: i64, size: u64, max: u32, orientation: u16) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     abs.hash(&mut h);

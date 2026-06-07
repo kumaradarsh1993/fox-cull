@@ -14,6 +14,8 @@ export const api = {
   warmThumbnails: (paths: string[], max: number) =>
     invoke<void>("warm_thumbnails", { paths, max }).catch(() => {}),
   loupeSrc: (path: string) => invoke<string>("loupe_src", { path }),
+  /** Cached poster frame (filesystem path) for a video, via bundled ffmpeg. */
+  videoPoster: (path: string) => invoke<string>("video_poster", { path }),
   setRating: (path: string, rating: number) =>
     invoke<void>("set_rating", { path, rating }),
   setLabel: (path: string, label: string | null) =>

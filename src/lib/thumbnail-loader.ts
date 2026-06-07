@@ -29,14 +29,14 @@ export function resetThumbs() {
   pending.clear();
 }
 
-export function loadThumb(path: string, size: number): Promise<string | null> {
-  const key = `${path}@${size}`;
-
+/** Shared queue/dedup/cap machinery. `fetchFsPath` resolves to a filesystem path
+ *  the backend produced; we convert it to an asset URL and memoize it. */
+function enqueue(key: string, fetchFsPath: () => Promise<string>): Promise<string | null> {
   const cached = memo.get(key);
   if (cached) return Promise.resolve(cached);
 
   const existing = pending.get(key);
-  if (existing) return existing; // someone is already decoding this exact thumb
+  if (existing) return existing; // already in flight — share it
 
   const myGen = generation;
   const promise = new Promise<string | null>((resolve) => {
@@ -48,8 +48,7 @@ export function loadThumb(path: string, size: number): Promise<string | null> {
         return;
       }
       inflight++;
-      api
-        .thumbnail(path, size)
+      fetchFsPath()
         .then((fsPath) => {
           const url = api.fileSrc(fsPath);
           memo.set(key, url);
@@ -67,4 +66,13 @@ export function loadThumb(path: string, size: number): Promise<string | null> {
 
   pending.set(key, promise);
   return promise;
+}
+
+export function loadThumb(path: string, size: number): Promise<string | null> {
+  return enqueue(`${path}@${size}`, () => api.thumbnail(path, size));
+}
+
+/** Cached video poster frame (bundled ffmpeg), through the same capped queue. */
+export function loadVideoPoster(path: string): Promise<string | null> {
+  return enqueue(`vid:${path}`, () => api.videoPoster(path));
 }

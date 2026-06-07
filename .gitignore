@@ -9,6 +9,8 @@ node_modules/
 # tauri
 /src-tauri/target/
 /src-tauri/gen/
+# bundled ffmpeg sidecar (fetched per-platform in CI, never committed)
+/src-tauri/binaries/
 
 # env / editor
 .DS_Store
