@@ -8,6 +8,7 @@ export type ViewMode = "grid" | "details" | "loupe";
 export type FilmstripPos = "bottom" | "right" | "hidden";
 export type SortBy = "name" | "date" | "capture" | "type" | "size";
 export type SortDir = "asc" | "desc";
+export type GroupBy = "none" | "month" | "week";
 export type TypeFilter = "all" | "image" | "video" | "raw";
 export type DeleteMode = "recycle" | "folder";
 
@@ -20,8 +21,8 @@ export interface AppSettings {
   gridSize: number;
   sortBy: SortBy;
   sortDir: SortDir;
-  /** Group the grid into month sections by real capture date. */
-  groupByMonth: boolean;
+  /** Section the grid by real capture date — off, by month, or by week. */
+  groupBy: GroupBy;
   typeFilter: TypeFilter;
   includeSub: boolean;
   deleteMode: DeleteMode;
@@ -39,7 +40,7 @@ const DEFAULTS: AppSettings = {
   gridSize: 176,
   sortBy: "name",
   sortDir: "asc",
-  groupByMonth: false,
+  groupBy: "none",
   typeFilter: "all",
   includeSub: true,
   deleteMode: "recycle",
@@ -60,8 +61,12 @@ class Settings {
     if (this.ready) return;
     try {
       this.store = await Store.load(FILE);
-      const loaded = await this.store.get<AppSettings>(KEY);
-      if (loaded) this.s = { ...DEFAULTS, ...loaded };
+      const loaded = await this.store.get<AppSettings & { groupByMonth?: boolean }>(KEY);
+      if (loaded) {
+        // Migrate the old boolean month toggle to the new granularity field.
+        if (loaded.groupBy === undefined && loaded.groupByMonth) loaded.groupBy = "month";
+        this.s = { ...DEFAULTS, ...loaded };
+      }
     } catch {
       // first run / store unavailable — defaults stand
     }

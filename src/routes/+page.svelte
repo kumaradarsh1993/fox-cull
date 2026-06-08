@@ -18,6 +18,7 @@
   import SectionedGrid from "$lib/components/SectionedGrid.svelte";
   import VirtualStrip from "$lib/components/VirtualStrip.svelte";
   import DetailsView from "$lib/components/DetailsView.svelte";
+  import ContextMenu, { type MenuEntry } from "$lib/components/ContextMenu.svelte";
 
   type FlagFilter = "all" | "pick" | "reject" | "unflagged";
   type ViewMode = "grid" | "details" | "loupe";
@@ -41,9 +42,14 @@
   let allTags = $state<[string, number][]>([]);
   let tagInput = $state("");
 
+  // How many of the secondary (popover) filters are active — shown as a badge.
+  let activeFilterCount = $derived(
+    (minRating > 0 ? 1 : 0) + (labelFilter ? 1 : 0) + (tagFilter ? 1 : 0),
+  );
+
   let dimLevel = $state(0); // 0 normal · 1 dim panels · 2 lights out
   let settingsOpen = $state(false);
-  let tagMenuOpen = $state(false);
+  let filtersOpen = $state(false);
   let catInfo = $state<CatalogInfo | null>(null);
   let gridComp = $state<{ scrollToIndex: (i: number) => void } | null>(null);
   let loupeComp = $state<{ togglePlay: () => void; seekBy: (d: number) => void } | null>(null);
@@ -65,14 +71,19 @@
   // file's EXIF/creation_time is known.
   let captureMap = $state<Record<string, number>>({});
   const captureOf = (it: MediaItem) => captureMap[it.path] ?? it.mtime;
-  /** Month-section label for a capture timestamp, in UTC to match storage. */
-  function monthLabel(secs: number): string {
+  // Section helpers for the grouped grid (UTC, to match how dates are stored).
+  // Week = calendar week-of-month (days 1–7 = Week 1, 8–14 = Week 2, …).
+  function sectionKey(secs: number): string {
     const d = new Date(secs * 1000);
-    return d.toLocaleString(undefined, {
-      month: "long",
-      year: "numeric",
-      timeZone: "UTC",
-    });
+    const base = `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
+    if (settings.s.groupBy === "week") return `${base}-${Math.floor((d.getUTCDate() - 1) / 7)}`;
+    return base;
+  }
+  function sectionLabel(secs: number): string {
+    const d = new Date(secs * 1000);
+    const mon = d.toLocaleString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+    if (settings.s.groupBy === "week") return `${mon} · Week ${Math.floor((d.getUTCDate() - 1) / 7) + 1}`;
+    return mon;
   }
 
   // type → rating/label/flag/tag filters → sort, in one pass. Grouping by month
@@ -89,7 +100,7 @@
     else if (flagFilter === "unflagged") arr = arr.filter((i) => !i.flag);
 
     const dir = settings.s.sortDir === "asc" ? 1 : -1;
-    const by = settings.s.groupByMonth ? "capture" : settings.s.sortBy;
+    const by = settings.s.groupBy !== "none" ? "capture" : settings.s.sortBy;
     return [...arr].sort((a, b) => {
       let c = 0;
       if (by === "capture") c = captureOf(a) - captureOf(b);
@@ -102,22 +113,21 @@
     });
   });
 
-  // Month sections over the (capture-sorted) view, for the grouped grid.
-  let monthGroups = $derived.by(() => {
+  // Capture-date sections over the (capture-sorted) view, for the grouped grid.
+  let sections = $derived.by(() => {
     const out: { label: string; count: number }[] = [];
     let key = "";
     for (const it of view) {
-      const d = new Date(captureOf(it) * 1000);
-      const k = `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
+      const k = sectionKey(captureOf(it));
       if (k !== key) {
-        out.push({ label: monthLabel(captureOf(it)), count: 0 });
+        out.push({ label: sectionLabel(captureOf(it)), count: 0 });
         key = k;
       }
       out[out.length - 1].count++;
     }
     return out;
   });
-  let grouped = $derived(settings.s.groupByMonth && viewMode === "grid");
+  let grouped = $derived(settings.s.groupBy !== "none" && viewMode === "grid");
 
   let active = $derived(view.length ? view[Math.min(activeIndex, view.length - 1)] : null);
   let rejectedCount = $derived(items.filter((i) => i.flag === "reject").length);
@@ -208,7 +218,7 @@
   }
 
   /** Whether the current view depends on real capture dates. */
-  let needCaptures = $derived(settings.s.groupByMonth || settings.s.sortBy === "capture");
+  let needCaptures = $derived(settings.s.groupBy !== "none" || settings.s.sortBy === "capture");
 
   let capturesDir: string | null = null;
   async function fetchCaptures(dir: string, paths: string[]) {
@@ -351,10 +361,6 @@
     await api.removeTag([active.path], tag).catch(() => {});
     refreshTags();
   }
-  function pickTagFilter(t: string | null) {
-    tagFilter = t;
-    tagMenuOpen = false;
-  }
 
   function selectAllFiltered() {
     selected = new Set(view.map((i) => i.path));
@@ -378,6 +384,69 @@
     } else {
       setActiveTo(i);
     }
+  }
+
+  // ── right-click context menu (replaces the webview's native menu) ─────────
+  const isMac =
+    typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
+  const revealLabel = isMac ? "Reveal in Finder" : "Show in Explorer";
+  let menu = $state<{ x: number; y: number; entries: MenuEntry[] } | null>(null);
+
+  async function copyPath(p: string) {
+    try {
+      await navigator.clipboard.writeText(p);
+    } catch {
+      /* clipboard unavailable — ignore */
+    }
+  }
+
+  function mediaMenuEntries(ctx: MediaItem, ts: MediaItem[]): MenuEntry[] {
+    const sfx = ts.length > 1 ? ` (${ts.length})` : "";
+    const allPick = ts.length > 0 && ts.every((i) => i.flag === "pick");
+    const allReject = ts.length > 0 && ts.every((i) => i.flag === "reject");
+    return [
+      { label: "Previous", icon: "←", disabled: activeIndex <= 0, action: () => move(-1) },
+      { label: "Next", icon: "→", disabled: activeIndex >= view.length - 1, action: () => move(1) },
+      { separator: true },
+      {
+        label: viewMode === "loupe" ? "Back to grid" : "Open in Focus",
+        icon: "▣",
+        action: () => setView(viewMode === "loupe" ? "grid" : "loupe"),
+      },
+      {
+        label: ctx.kind === "video" ? "Open in system player" : "Open in default app",
+        icon: "▶",
+        action: () => api.openExternal(ctx.path),
+      },
+      { label: revealLabel, icon: "⤴", action: () => api.reveal(ctx.path) },
+      { separator: true },
+      { label: (allPick ? "Clear pick" : "Pick") + sfx, icon: "✓", on: allPick, action: () => flag("pick") },
+      {
+        label: (allReject ? "Clear reject" : "Reject") + sfx,
+        icon: "✕",
+        danger: !allReject,
+        on: allReject,
+        action: () => flag("reject"),
+      },
+      { label: "Clear rating & marks" + sfx, icon: "⟲", action: () => unset() },
+      { separator: true },
+      { label: "Copy file path", icon: "⧉", action: () => copyPath(ctx.path) },
+    ];
+  }
+
+  function openContextMenu(e: MouseEvent, ctx: MediaItem, i: number) {
+    e.preventDefault();
+    // Focus the right-clicked item unless it's already in a multi-selection.
+    if (!(selected.size > 1 && selected.has(ctx.path))) setActiveTo(i);
+    else activeIndex = i;
+    menu = { x: e.clientX, y: e.clientY, entries: mediaMenuEntries(ctx, targets()) };
+  }
+
+  /** Suppress the webview's native menu everywhere except real text inputs. */
+  function onGlobalContextMenu(e: MouseEvent) {
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+    e.preventDefault();
   }
 
   // ── long-press delete (no modal, no toast) ──────────────────────────────
@@ -506,7 +575,7 @@
   }
 </script>
 
-<svelte:window {onkeydown} />
+<svelte:window {onkeydown} oncontextmenu={onGlobalContextMenu} />
 
 {#snippet gridCell(item: MediaItem, i: number)}
   <button
@@ -516,6 +585,7 @@
     class:reject={item.flag === "reject"}
     onclick={(e) => gridCellClick(e, i)}
     ondblclick={() => { setActiveTo(i); setView("loupe"); }}
+    oncontextmenu={(e) => openContextMenu(e, item, i)}
   >
     <Thumb {item} size={320} />
     <span class="ov">
@@ -535,6 +605,7 @@
     class:reject={item.flag === "reject"}
     onclick={() => setActiveTo(i)}
     ondblclick={() => { setActiveTo(i); setView("loupe"); }}
+    oncontextmenu={(e) => openContextMenu(e, item, i)}
     title={item.name}
   >
     <Thumb {item} size={320} />
@@ -580,8 +651,11 @@
         <button class="chip" class:on={viewMode === "loupe"} onclick={() => setView("loupe")}>▣ Focus</button>
       </div>
 
+      <span class="div"></span>
+
+      <!-- sort + date grouping -->
       <div class="grp">
-        <select class="sel" bind:value={settings.s.sortBy} onchange={() => { settings.set({ sortBy: settings.s.sortBy }); maybeFetchCaptures(); }}>
+        <select class="sel" title="Sort order" bind:value={settings.s.sortBy} onchange={() => { settings.set({ sortBy: settings.s.sortBy }); maybeFetchCaptures(); }}>
           <option value="name">Name</option>
           <option value="date">Date (modified)</option>
           <option value="capture">Capture date</option>
@@ -591,23 +665,19 @@
         <button class="ico" title="Sort direction" onclick={() => settings.set({ sortDir: settings.s.sortDir === "asc" ? "desc" : "asc" })}>
           {settings.s.sortDir === "asc" ? "↑" : "↓"}
         </button>
-        <button
-          class="ico"
-          class:on={settings.s.groupByMonth}
-          title="Group by month (real capture date)"
-          onclick={() => { settings.set({ groupByMonth: !settings.s.groupByMonth }); maybeFetchCaptures(); }}
-        >🗓</button>
+        <select class="sel" title="Section the grid by capture date" bind:value={settings.s.groupBy} onchange={() => { settings.set({ groupBy: settings.s.groupBy }); maybeFetchCaptures(); }}>
+          <option value="none">No groups</option>
+          <option value="month">Group: month</option>
+          <option value="week">Group: week</option>
+        </select>
       </div>
 
+      <span class="div"></span>
+
+      <!-- type + flag (primary culling filters) -->
       <div class="seg">
         {#each [["all", "All"], ["image", "Photos"], ["video", "Video"], ["raw", "RAW"]] as [val, lbl]}
           <button class="chip" class:on={settings.s.typeFilter === val} onclick={() => settings.set({ typeFilter: val as typeof settings.s.typeFilter })}>{lbl}</button>
-        {/each}
-      </div>
-
-      <div class="seg">
-        {#each [1, 2, 3, 4, 5] as n}
-          <button class="starf" class:on={minRating >= n} onclick={() => (minRating = minRating === n ? 0 : n)} title="Filter {n}+ stars">★</button>
         {/each}
       </div>
 
@@ -618,37 +688,56 @@
         <button class="chip" class:on={flagFilter === "unflagged"} onclick={() => (flagFilter = "unflagged")}>Unflagged</button>
       </div>
 
-      <div class="seg">
-        <button class="dot any" class:on={labelFilter === null} onclick={() => (labelFilter = null)} title="Any label">∅</button>
-        {#each LABELS as l}
-          <button class="dot" class:on={labelFilter === l.key} style="background:var({l.varName})" title={l.name} aria-label={l.name} onclick={() => (labelFilter = labelFilter === l.key ? null : l.key)}></button>
-        {/each}
-      </div>
-
-      <!-- tags filter -->
-      <div class="grp tagwrap">
-        <button class="chip" class:on={tagFilter !== null} onclick={() => (tagMenuOpen = !tagMenuOpen)} title="Filter by tag">
-          🏷 {tagFilter ?? "Tags"}
+      <!-- consolidated secondary filters (rating · label · tag · scope) -->
+      <div class="grp filterwrap">
+        <button class="chip" class:on={filtersOpen || activeFilterCount > 0} onclick={() => (filtersOpen = !filtersOpen)} title="Rating, label, tag & scope filters">
+          ⛃ Filters{activeFilterCount ? ` ·${activeFilterCount}` : ""}
         </button>
-        {#if tagMenuOpen}
-          <div class="tagmenu">
-            <button class="tagrow" class:on={tagFilter === null} onclick={() => pickTagFilter(null)}>Any tag</button>
-            {#if allTags.length}
-              {#each allTags as [t, n]}
-                <button class="tagrow" class:on={tagFilter === t} onclick={() => pickTagFilter(t)}>
-                  <span>{t}</span><span class="cnt">{n}</span>
-                </button>
-              {/each}
-            {:else}
-              <p class="tagempty">No tags yet. Add one to the selected photo below.</p>
-            {/if}
+        {#if filtersOpen}
+          <div class="filtermenu">
+            <div class="fm-row">
+              <span class="fm-lbl">Rating</span>
+              <div class="seg">
+                {#each [1, 2, 3, 4, 5] as n}
+                  <button class="starf" class:on={minRating >= n} onclick={() => (minRating = minRating === n ? 0 : n)} title="{n}+ stars">★</button>
+                {/each}
+                {#if minRating > 0}<button class="fm-clr" onclick={() => (minRating = 0)}>clear</button>{/if}
+              </div>
+            </div>
+            <div class="fm-row">
+              <span class="fm-lbl">Label</span>
+              <div class="seg">
+                <button class="dot any" class:on={labelFilter === null} onclick={() => (labelFilter = null)} title="Any label">∅</button>
+                {#each LABELS as l}
+                  <button class="dot" class:on={labelFilter === l.key} style="background:var({l.varName})" title={l.name} aria-label={l.name} onclick={() => (labelFilter = labelFilter === l.key ? null : l.key)}></button>
+                {/each}
+              </div>
+            </div>
+            <div class="fm-row col">
+              <span class="fm-lbl">Tag</span>
+              <div class="fm-tags">
+                <button class="tagrow" class:on={tagFilter === null} onclick={() => (tagFilter = null)}>Any tag</button>
+                {#if allTags.length}
+                  {#each allTags as [t, n]}
+                    <button class="tagrow" class:on={tagFilter === t} onclick={() => (tagFilter = t)}>
+                      <span>{t}</span><span class="cnt">{n}</span>
+                    </button>
+                  {/each}
+                {:else}
+                  <p class="tagempty">No tags yet. Add one to the selected photo below.</p>
+                {/if}
+              </div>
+            </div>
+            <div class="fm-row">
+              <span class="fm-lbl">Scope</span>
+              <button class="chip" class:on={settings.s.includeSub} onclick={toggleSub} title="Include photos from subfolders">⊞ Include subfolders</button>
+            </div>
           </div>
         {/if}
       </div>
 
-      <button class="chip" class:on={settings.s.includeSub} onclick={toggleSub} title="Include photos from subfolders">⊞ Sub</button>
-
       {#if viewMode === "grid"}
+        <span class="div"></span>
         <div class="grp zoom" title="Thumbnail size">
           <span class="mini">▦</span>
           <input type="range" min="110" max="360" bind:value={settings.s.gridSize} onchange={() => settings.set({ gridSize: settings.s.gridSize })} />
@@ -723,7 +812,14 @@
 
     <!-- body: viewport (+ optional right filmstrip) -->
     <div class="body">
-      <div class="viewport" class:lit={dimLevel > 0}>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="viewport"
+        class:lit={dimLevel > 0}
+        oncontextmenu={(e) => {
+          if (viewMode === "loupe" && active) openContextMenu(e, active, activeIndex);
+        }}
+      >
         {#if loading}
           <div class="welcome"><p>Scanning {currentDir ? basename(currentDir) : ""}…</p></div>
         {:else if !currentDir}
@@ -746,7 +842,7 @@
         {:else if grouped}
           <SectionedGrid
             items={view}
-            groups={monthGroups}
+            groups={sections}
             {activeIndex}
             cellMin={settings.s.gridSize}
             bind:this={gridComp}
@@ -813,6 +909,10 @@
   {#if dimLevel > 0}
     <button class="scrim" aria-label="Exit dim mode" onclick={() => (dimLevel = 0)}></button>
   {/if}
+
+  {#if menu}
+    <ContextMenu x={menu.x} y={menu.y} entries={menu.entries} onclose={() => (menu = null)} />
+  {/if}
 </div>
 
 <style>
@@ -858,8 +958,15 @@
   .zoom input { width: 90px; accent-color: var(--accent); }
   .btn.sm { padding: 5px 10px; border-radius: 7px; font-size: 12.5px; }
 
-  .tagwrap { position: relative; }
-  .tagmenu { position: absolute; top: 32px; left: 0; z-index: 30; min-width: 180px; max-height: 320px; overflow-y: auto; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 9px; box-shadow: var(--shadow); padding: 5px; }
+  .div { flex: 0 0 auto; align-self: stretch; width: 1px; margin: 2px 4px; background: var(--border); }
+  .filterwrap { position: relative; }
+  .filtermenu { position: absolute; top: 34px; left: 0; z-index: 30; width: 290px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 11px; display: flex; flex-direction: column; gap: 11px; }
+  .fm-row { display: flex; align-items: center; gap: 10px; }
+  .fm-row.col { flex-direction: column; align-items: stretch; gap: 5px; }
+  .fm-lbl { flex: 0 0 46px; font-size: 12px; color: var(--text-dim); }
+  .fm-tags { display: flex; flex-direction: column; gap: 2px; max-height: 200px; overflow-y: auto; }
+  .fm-clr { font-size: 11px; color: var(--text-faint); padding: 0 4px; margin-left: 4px; }
+  .fm-clr:hover { color: var(--text); }
   .tagrow { display: flex; justify-content: space-between; gap: 10px; width: 100%; text-align: left; padding: 6px 9px; border-radius: 6px; font-size: 12.5px; color: var(--text); }
   .tagrow:hover { background: var(--bg-hover); }
   .tagrow.on { background: var(--accent); color: var(--accent-on); }
