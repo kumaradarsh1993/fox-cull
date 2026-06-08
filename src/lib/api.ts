@@ -1,6 +1,12 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import type { TreeDir, MediaItem, TrashOutcome, CatalogInfo } from "./types";
+import type {
+  TreeDir,
+  MediaItem,
+  TrashOutcome,
+  CatalogInfo,
+  FilmstripInfo,
+} from "./types";
 
 export const api = {
   setLibraryRoot: (root: string) => invoke<void>("set_library_root", { root }),
@@ -16,6 +22,9 @@ export const api = {
   loupeSrc: (path: string) => invoke<string>("loupe_src", { path }),
   /** Cached poster frame (filesystem path) for a video, via bundled ffmpeg. */
   videoPoster: (path: string) => invoke<string>("video_poster", { path }),
+  /** Tiled sprite of frames for decode-free scrubbing (built lazily, cached). */
+  videoFilmstrip: (path: string) =>
+    invoke<FilmstripInfo>("video_filmstrip", { path }),
   getTrim: (path: string) => invoke<[number, number] | null>("get_trim", { path }),
   setTrim: (path: string, inS: number, outS: number) =>
     invoke<void>("set_trim", { path, in_s: inS, out_s: outS }).catch(() => {}),

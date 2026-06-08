@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api } from "$lib/api";
   import { loadThumb } from "$lib/thumbnail-loader";
-  import type { MediaItem } from "$lib/types";
+  import type { MediaItem, FilmstripInfo } from "$lib/types";
 
   let { item }: { item: MediaItem | null } = $props();
 
@@ -19,6 +19,17 @@
   let exporting = $state(false);
   let exportNote = $state<string | null>(null);
 
+  // ── filmstrip scrub state ──
+  let strip = $state<FilmstripInfo | null>(null);
+  let stripSrc = $derived(strip ? api.fileSrc(strip.src) : null);
+  let preview = $state<number | null>(null); // fraction 0..1 to preview, or null
+  let scrubbing = $state(false);
+  let trackEl = $state<HTMLDivElement | null>(null);
+  const PREVIEW_W = 200;
+  let previewH = $derived(
+    strip ? Math.round((PREVIEW_W * strip.tile_h) / strip.tile_w) : 0,
+  );
+
   $effect(() => {
     const it = item;
     src = null;
@@ -30,6 +41,9 @@
     inS = 0;
     outS = null;
     exportNote = null;
+    strip = null;
+    preview = null;
+    scrubbing = false;
     if (!it) return;
     if (it.kind === "image" || it.kind === "raw") {
       loadThumb(it.path, 320).then((s) => {
@@ -43,6 +57,14 @@
           outS = t[1];
         }
       });
+      // Build/fetch the scrub filmstrip (lazy, cached on the SSD). Failure just
+      // leaves the timeline as a plain seek bar with no frame preview.
+      api
+        .videoFilmstrip(it.path)
+        .then((f) => {
+          if (item === it) strip = f;
+        })
+        .catch(() => {});
     }
     (async () => {
       try {
@@ -56,6 +78,55 @@
 
   function onMeta() {
     if (vid) dur = vid.duration || 0;
+  }
+
+  // ── timeline scrub: hover previews a frame, drag seeks the real video ──
+  function fracFromEvent(e: PointerEvent): number {
+    if (!trackEl) return 0;
+    const r = trackEl.getBoundingClientRect();
+    return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+  }
+  function seekTo(frac: number) {
+    const d = dur || strip?.duration || 0;
+    if (vid && d > 0) vid.currentTime = frac * d;
+  }
+  function onTrackDown(e: PointerEvent) {
+    scrubbing = true;
+    try {
+      trackEl?.setPointerCapture(e.pointerId);
+    } catch {}
+    const f = fracFromEvent(e);
+    preview = f;
+    seekTo(f);
+  }
+  function onTrackMove(e: PointerEvent) {
+    const f = fracFromEvent(e);
+    preview = f;
+    if (scrubbing) seekTo(f);
+  }
+  function onTrackUp(e: PointerEvent) {
+    if (!scrubbing) return;
+    scrubbing = false;
+    try {
+      trackEl?.releasePointerCapture(e.pointerId);
+    } catch {}
+  }
+  function onTrackLeave() {
+    if (!scrubbing) preview = null;
+  }
+  /** Sprite background-position (%) for the frame nearest `frac`. */
+  function cellPos(frac: number): { x: number; y: number } {
+    if (!strip) return { x: 0, y: 0 };
+    const idx = Math.min(
+      strip.count - 1,
+      Math.max(0, Math.round(frac * (strip.count - 1))),
+    );
+    const col = idx % strip.cols;
+    const row = Math.floor(idx / strip.cols);
+    return {
+      x: strip.cols > 1 ? (col / (strip.cols - 1)) * 100 : 0,
+      y: strip.rows > 1 ? (row / (strip.rows - 1)) * 100 : 0,
+    };
   }
   function onTime() {
     if (vid) cur = vid.currentTime || 0;
@@ -123,9 +194,30 @@
           onerror={() => (videoErr = true)}
         ></video>
         <div class="trim">
-          <div class="track">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="track"
+            class:scrubbing
+            bind:this={trackEl}
+            onpointerdown={onTrackDown}
+            onpointermove={onTrackMove}
+            onpointerup={onTrackUp}
+            onpointerleave={onTrackLeave}
+          >
             <div class="range" style="left:{pct(inS)}%; right:{100 - pct(outS ?? dur)}%"></div>
             <div class="cursor" style="left:{pct(cur)}%"></div>
+            {#if preview != null && strip && stripSrc}
+              {@const c = cellPos(preview)}
+              <div
+                class="scrubprev"
+                style="left:{preview * 100}%; width:{PREVIEW_W}px; height:{previewH}px;
+                       background-image:url('{stripSrc}');
+                       background-size:{strip.cols * 100}% {strip.rows * 100}%;
+                       background-position:{c.x}% {c.y}%;"
+              >
+                <span class="ts">{fmt(preview * (dur || strip.duration))}</span>
+              </div>
+            {/if}
           </div>
           <div class="ctrls">
             <button onclick={setIn} title="Set in point to current time">⟤ In {fmt(inS)}</button>
@@ -205,25 +297,58 @@
   }
   .track {
     position: relative;
-    height: 8px;
-    border-radius: 4px;
+    height: 12px;
+    border-radius: 6px;
     background: color-mix(in srgb, var(--text-faint) 30%, transparent);
     margin-bottom: 8px;
+    cursor: pointer;
+    touch-action: none; /* let pointer-drag scrub instead of scrolling */
+  }
+  .track.scrubbing {
+    cursor: grabbing;
   }
   .range {
     position: absolute;
     top: 0;
     bottom: 0;
     background: color-mix(in srgb, var(--accent) 55%, transparent);
-    border-radius: 4px;
+    border-radius: 6px;
+    pointer-events: none;
   }
   .cursor {
     position: absolute;
     top: -2px;
     width: 2px;
-    height: 12px;
+    height: 16px;
     background: #fff;
     transform: translateX(-1px);
+    pointer-events: none;
+  }
+  /* Floating frame preview shown under the scrub cursor (sprite cell). */
+  .scrubprev {
+    position: absolute;
+    bottom: calc(100% + 9px);
+    transform: translateX(-50%);
+    border-radius: 7px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background-color: #000;
+    background-repeat: no-repeat;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+    pointer-events: none;
+    overflow: hidden;
+    z-index: 60;
+  }
+  .scrubprev .ts {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    text-align: center;
+    font-size: 11px;
+    line-height: 1.5;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.55);
+    font-variant-numeric: tabular-nums;
   }
   .ctrls {
     display: flex;

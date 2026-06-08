@@ -30,6 +30,17 @@ export interface CatalogInfo {
   is_default: boolean;
 }
 
+/** A tiled sprite of frames for decode-free video scrubbing (Tier 2). */
+export interface FilmstripInfo {
+  src: string;
+  cols: number;
+  rows: number;
+  count: number;
+  tile_w: number;
+  tile_h: number;
+  duration: number;
+}
+
 export interface Filter {
   minRating: number;
   label: string | null;

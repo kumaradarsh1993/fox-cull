@@ -109,6 +109,7 @@ pub fn run() {
             commands::warm_thumbnails,
             commands::loupe_src,
             commands::video_poster,
+            commands::video_filmstrip,
             commands::set_rating,
             commands::set_label,
             commands::set_flag,

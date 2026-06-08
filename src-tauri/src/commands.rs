@@ -415,6 +415,48 @@ pub async fn video_poster(state: State<'_, AppState>, path: String) -> Result<St
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize)]
+pub struct FilmstripInfo {
+    /// Filesystem path of the sprite JPEG (frontend converts via convertFileSrc).
+    pub src: String,
+    pub cols: u32,
+    pub rows: u32,
+    pub count: u32,
+    pub tile_w: u32,
+    pub tile_h: u32,
+    pub duration: f64,
+}
+
+/// Build (or fetch the cached) filmstrip sprite for a video — a tiled grid of
+/// frames the loupe shows under the scrub cursor for instant, decode-free
+/// scrubbing. Generated lazily on first open; cached beside the poster on the
+/// SSD. Errors (no ffmpeg, unreadable duration) leave the timeline as a plain
+/// seek bar with no hover preview.
+#[tauri::command]
+pub async fn video_filmstrip(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<FilmstripInfo, String> {
+    let cache_dir = state.cache_dir.lock().clone();
+    let ffmpeg = state.ffmpeg.clone();
+    let src = PathBuf::from(&path);
+    tauri::async_runtime::spawn_blocking(move || {
+        video::ensure_filmstrip(&cache_dir, ffmpeg.as_deref(), &src).map(|(sprite, fs)| {
+            FilmstripInfo {
+                src: sprite.to_string_lossy().to_string(),
+                cols: fs.cols,
+                rows: fs.rows,
+                count: fs.count,
+                tile_w: fs.tile_w,
+                tile_h: fs.tile_h,
+                duration: fs.duration,
+            }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Proactively generate (and disk-cache) grid thumbnails for a whole folder in
 /// parallel across all cores, so scrolling the grid/filmstrip is smooth instead
 /// of decoding lazily under the user's cursor. Fire-and-forget from the frontend
@@ -657,6 +699,10 @@ fn cache_files_for(cache_dir: &Path, src: &str) -> Vec<PathBuf> {
         }
     }
     out.push(video::poster_path(cache_dir, p));
+    // Filmstrip sprite + its geometry sidecar, so a deleted clip leaves no orphan.
+    let strip = video::filmstrip_path(cache_dir, p);
+    out.push(strip.with_extension("json"));
+    out.push(strip);
     out
 }
 
