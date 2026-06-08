@@ -565,6 +565,70 @@ pub fn list_tags(catalog: State<'_, Catalog>) -> Vec<(String, i64)> {
     catalog.all_tags()
 }
 
+// ── video trim (in/out points + lossless cut) ───────────────────────────────
+
+#[tauri::command]
+pub fn get_trim(
+    state: State<'_, AppState>,
+    catalog: State<'_, Catalog>,
+    path: String,
+) -> Option<(f64, f64)> {
+    let rel = rel_of(&state.root.lock().clone(), &path);
+    catalog.get_trim(&rel)
+}
+
+#[tauri::command]
+pub fn set_trim(
+    state: State<'_, AppState>,
+    catalog: State<'_, Catalog>,
+    path: String,
+    in_s: f64,
+    out_s: f64,
+) -> Result<(), String> {
+    let rel = rel_of(&state.root.lock().clone(), &path);
+    catalog.set_trim(&rel, in_s, out_s).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn clear_trim(state: State<'_, AppState>, catalog: State<'_, Catalog>, path: String) {
+    let rel = rel_of(&state.root.lock().clone(), &path);
+    catalog.clear_trim(&rel);
+}
+
+/// Export a lossless cut of `path` between in/out (seconds) next to the original
+/// as `<name>_cut.<ext>` (uniquified). No re-encode. Returns the new file path.
+#[tauri::command]
+pub async fn trim_video(
+    state: State<'_, AppState>,
+    path: String,
+    in_s: f64,
+    out_s: f64,
+) -> Result<String, String> {
+    let ffmpeg = state.ffmpeg.clone().ok_or("ffmpeg not available")?;
+    let src = PathBuf::from(&path);
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "clip".into());
+    let ext = src
+        .extension()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "mp4".into());
+    // Pick a non-colliding destination in the same folder.
+    let mut dest = src.with_file_name(format!("{stem}_cut.{ext}"));
+    let mut n = 2;
+    while dest.exists() {
+        dest = src.with_file_name(format!("{stem}_cut{n}.{ext}"));
+        n += 1;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        video::trim(&ffmpeg, &src, in_s, out_s, &dest)
+            .map(|_| dest.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Absolute paths of every file currently flagged `reject`, across the whole
 /// catalog — the input to the delete sweep.
 #[tauri::command]

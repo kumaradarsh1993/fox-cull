@@ -16,6 +16,12 @@ export const api = {
   loupeSrc: (path: string) => invoke<string>("loupe_src", { path }),
   /** Cached poster frame (filesystem path) for a video, via bundled ffmpeg. */
   videoPoster: (path: string) => invoke<string>("video_poster", { path }),
+  getTrim: (path: string) => invoke<[number, number] | null>("get_trim", { path }),
+  setTrim: (path: string, inS: number, outS: number) =>
+    invoke<void>("set_trim", { path, in_s: inS, out_s: outS }).catch(() => {}),
+  clearTrim: (path: string) => invoke<void>("clear_trim", { path }).catch(() => {}),
+  trimVideo: (path: string, inS: number, outS: number) =>
+    invoke<string>("trim_video", { path, in_s: inS, out_s: outS }),
   setRating: (path: string, rating: number) =>
     invoke<void>("set_rating", { path, rating }),
   setLabel: (path: string, label: string | null) =>

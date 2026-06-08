@@ -83,7 +83,42 @@ impl Catalog {
             [],
         )?;
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag)", [])?;
+        // Per-video trim in/out points (seconds), for the lossless cut feature.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS trims (
+                rel   TEXT PRIMARY KEY,
+                in_s  REAL NOT NULL,
+                out_s REAL NOT NULL
+            )",
+            [],
+        )?;
         Ok(conn)
+    }
+
+    /// Stored trim in/out (seconds) for a clip, if any.
+    pub fn get_trim(&self, rel: &str) -> Option<(f64, f64)> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT in_s, out_s FROM trims WHERE rel = ?1",
+            params![rel],
+            |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?)),
+        )
+        .ok()
+    }
+
+    pub fn set_trim(&self, rel: &str, in_s: f64, out_s: f64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO trims(rel, in_s, out_s) VALUES(?1, ?2, ?3)
+             ON CONFLICT(rel) DO UPDATE SET in_s = ?2, out_s = ?3",
+            params![rel, in_s, out_s],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_trim(&self, rel: &str) {
+        let conn = self.conn.lock();
+        let _ = conn.execute("DELETE FROM trims WHERE rel = ?1", params![rel]);
     }
 
     /// Fetch every decision at or under a rel-path prefix in a SINGLE query.
@@ -211,6 +246,7 @@ impl Catalog {
         for rel in rels {
             let _ = conn.execute("DELETE FROM decisions WHERE rel = ?1", params![rel]);
             let _ = conn.execute("DELETE FROM tags WHERE rel = ?1", params![rel]);
+            let _ = conn.execute("DELETE FROM trims WHERE rel = ?1", params![rel]);
         }
     }
 

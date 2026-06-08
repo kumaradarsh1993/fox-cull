@@ -112,6 +112,53 @@ pub fn make_poster(ffmpeg: &Path, src: &Path, out: &Path) -> Result<(), String> 
     }
 }
 
+/// Lossless trim: copy the stream between `in_s` and `out_s` (seconds) to `dest`
+/// with NO re-encode (`-c copy`) — instant even on huge files, exactly like
+/// LosslessCut. `-ss` before `-i` does a fast keyframe seek; `-t` gives the
+/// duration so the cut length is unambiguous. Returns the output path.
+pub fn trim(
+    ffmpeg: &Path,
+    src: &Path,
+    in_s: f64,
+    out_s: f64,
+    dest: &Path,
+) -> Result<(), String> {
+    if out_s <= in_s {
+        return Err("out point must be after in point".into());
+    }
+    let dur = out_s - in_s;
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-v", "error", "-ss", &format!("{in_s:.3}"), "-i"])
+        .arg(src)
+        .args([
+            "-t",
+            &format!("{dur:.3}"),
+            "-c",
+            "copy",
+            "-map",
+            "0",
+            "-avoid_negative_ts",
+            "make_zero",
+            "-y",
+        ])
+        .arg(dest)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let status = cmd.status().map_err(|e| e.to_string())?;
+    if status.success() && dest.exists() {
+        Ok(())
+    } else {
+        Err("ffmpeg trim failed".into())
+    }
+}
+
 /// Ensure a poster exists for `src`; returns its cache path. `ffmpeg=None` (not
 /// bundled / dev) yields an error so the UI shows the film placeholder.
 pub fn ensure_poster(cache_dir: &Path, ffmpeg: Option<&Path>, src: &Path) -> Result<PathBuf, String> {
