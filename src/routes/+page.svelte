@@ -15,6 +15,7 @@
   import Thumb from "$lib/components/Thumb.svelte";
   import Loupe from "$lib/components/Loupe.svelte";
   import VirtualGrid from "$lib/components/VirtualGrid.svelte";
+  import SectionedGrid from "$lib/components/SectionedGrid.svelte";
   import VirtualStrip from "$lib/components/VirtualStrip.svelte";
   import DetailsView from "$lib/components/DetailsView.svelte";
 
@@ -53,7 +54,23 @@
   const basename = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
   let viewMode = $derived(settings.s.viewMode as ViewMode);
 
-  // type → rating/label/flag/tag filters → sort, in one pass.
+  // Real capture timestamps (path → Unix secs), filled lazily after a folder
+  // loads so folder-open stays instant. Falls back to file mtime until/unless a
+  // file's EXIF/creation_time is known.
+  let captureMap = $state<Record<string, number>>({});
+  const captureOf = (it: MediaItem) => captureMap[it.path] ?? it.mtime;
+  /** Month-section label for a capture timestamp, in UTC to match storage. */
+  function monthLabel(secs: number): string {
+    const d = new Date(secs * 1000);
+    return d.toLocaleString(undefined, {
+      month: "long",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+  }
+
+  // type → rating/label/flag/tag filters → sort, in one pass. Grouping by month
+  // implies sorting by capture date (that's the order the sections need).
   let view = $derived.by(() => {
     let arr = items;
     const tf = settings.s.typeFilter;
@@ -66,16 +83,34 @@
     else if (flagFilter === "unflagged") arr = arr.filter((i) => !i.flag);
 
     const dir = settings.s.sortDir === "asc" ? 1 : -1;
-    const by = settings.s.sortBy;
+    const by = settings.s.groupByMonth ? "capture" : settings.s.sortBy;
     return [...arr].sort((a, b) => {
       let c = 0;
-      if (by === "date") c = a.mtime - b.mtime;
+      if (by === "capture") c = captureOf(a) - captureOf(b);
+      else if (by === "date") c = a.mtime - b.mtime;
       else if (by === "size") c = a.size - b.size;
       else if (by === "type") c = a.kind.localeCompare(b.kind);
       if (c === 0) c = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
       return c * dir;
     });
   });
+
+  // Month sections over the (capture-sorted) view, for the grouped grid.
+  let monthGroups = $derived.by(() => {
+    const out: { label: string; count: number }[] = [];
+    let key = "";
+    for (const it of view) {
+      const d = new Date(captureOf(it) * 1000);
+      const k = `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
+      if (k !== key) {
+        out.push({ label: monthLabel(captureOf(it)), count: 0 });
+        key = k;
+      }
+      out[out.length - 1].count++;
+    }
+    return out;
+  });
+  let grouped = $derived(settings.s.groupByMonth && viewMode === "grid");
 
   let active = $derived(view.length ? view[Math.min(activeIndex, view.length - 1)] : null);
   let rejectedCount = $derived(items.filter((i) => i.flag === "reject").length);
@@ -126,6 +161,8 @@
     loading = true;
     resetThumbs();
     selected = new Set();
+    captureMap = {};
+    capturesDir = null;
     try {
       await api.setLibraryRoot(rootForDir(dir));
       items = await api.listFolderMedia(dir, settings.s.includeSub);
@@ -158,6 +195,35 @@
       if (currentDir === dir) api.warmThumbnails(order, THUMB_MAX);
     }, 500);
     refreshTags();
+    // Index real capture dates in the background — only when a date-driven view
+    // needs them (sort-by-capture or month grouping). Cached after the first pass.
+    maybeFetchCaptures();
+  }
+
+  /** Whether the current view depends on real capture dates. */
+  let needCaptures = $derived(settings.s.groupByMonth || settings.s.sortBy === "capture");
+
+  let capturesDir: string | null = null;
+  async function fetchCaptures(dir: string, paths: string[]) {
+    if (!paths.length) return;
+    capturesDir = dir;
+    try {
+      const res = await api.captureDates(dir, paths);
+      if (currentDir !== dir) return;
+      const m: Record<string, number> = {};
+      for (const r of res) m[r.path] = r.captured;
+      captureMap = m;
+    } catch {
+      capturesDir = null; // allow a retry
+    }
+  }
+  function maybeFetchCaptures() {
+    if (!currentDir || !needCaptures) return;
+    if (capturesDir === currentDir) return; // already fetched for this folder
+    fetchCaptures(
+      currentDir,
+      items.map((i) => i.path),
+    );
   }
 
   async function openFolderPicker() {
@@ -501,15 +567,22 @@
       </div>
 
       <div class="grp">
-        <select class="sel" bind:value={settings.s.sortBy} onchange={() => settings.set({ sortBy: settings.s.sortBy })}>
+        <select class="sel" bind:value={settings.s.sortBy} onchange={() => { settings.set({ sortBy: settings.s.sortBy }); maybeFetchCaptures(); }}>
           <option value="name">Name</option>
-          <option value="date">Date</option>
+          <option value="date">Date (modified)</option>
+          <option value="capture">Capture date</option>
           <option value="type">Type</option>
           <option value="size">Size</option>
         </select>
         <button class="ico" title="Sort direction" onclick={() => settings.set({ sortDir: settings.s.sortDir === "asc" ? "desc" : "asc" })}>
           {settings.s.sortDir === "asc" ? "↑" : "↓"}
         </button>
+        <button
+          class="ico"
+          class:on={settings.s.groupByMonth}
+          title="Group by month (real capture date)"
+          onclick={() => { settings.set({ groupByMonth: !settings.s.groupByMonth }); maybeFetchCaptures(); }}
+        >🗓</button>
       </div>
 
       <div class="seg">
@@ -655,6 +728,15 @@
             {selected}
             onrowclick={gridCellClick}
             onrowdblclick={(i) => { setActiveTo(i); setView("loupe"); }}
+          />
+        {:else if grouped}
+          <SectionedGrid
+            items={view}
+            groups={monthGroups}
+            {activeIndex}
+            cellMin={settings.s.gridSize}
+            bind:this={gridComp}
+            cell={gridCell}
           />
         {:else}
           <VirtualGrid items={view} {activeIndex} cellMin={settings.s.gridSize} bind:this={gridComp} cell={gridCell} />

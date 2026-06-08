@@ -6,7 +6,7 @@ import { Store } from "@tauri-apps/plugin-store";
 export type Theme = "light" | "dark";
 export type ViewMode = "grid" | "details" | "loupe";
 export type FilmstripPos = "bottom" | "right" | "hidden";
-export type SortBy = "name" | "date" | "type" | "size";
+export type SortBy = "name" | "date" | "capture" | "type" | "size";
 export type SortDir = "asc" | "desc";
 export type TypeFilter = "all" | "image" | "video" | "raw";
 export type DeleteMode = "recycle" | "folder";
@@ -20,6 +20,8 @@ export interface AppSettings {
   gridSize: number;
   sortBy: SortBy;
   sortDir: SortDir;
+  /** Group the grid into month sections by real capture date. */
+  groupByMonth: boolean;
   typeFilter: TypeFilter;
   includeSub: boolean;
   deleteMode: DeleteMode;
@@ -37,6 +39,7 @@ const DEFAULTS: AppSettings = {
   gridSize: 176,
   sortBy: "name",
   sortDir: "asc",
+  groupByMonth: false,
   typeFilter: "all",
   includeSub: true,
   deleteMode: "recycle",

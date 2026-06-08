@@ -92,6 +92,19 @@ impl Catalog {
             )",
             [],
         )?;
+        // Cached capture timestamps (EXIF DateTimeOriginal / video creation_time),
+        // keyed by rel-path and validated against (mtime, size) so a replaced file
+        // re-indexes. Lets folder-open stay instant (no eager EXIF) while sorting
+        // and month-grouping use the real capture date, filled in the background.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS captures (
+                rel      TEXT PRIMARY KEY,
+                captured INTEGER NOT NULL,
+                mtime    INTEGER NOT NULL,
+                size     INTEGER NOT NULL
+            )",
+            [],
+        )?;
         Ok(conn)
     }
 
@@ -119,6 +132,61 @@ impl Catalog {
     pub fn clear_trim(&self, rel: &str) {
         let conn = self.conn.lock();
         let _ = conn.execute("DELETE FROM trims WHERE rel = ?1", params![rel]);
+    }
+
+    // ── capture-date cache ───────────────────────────────────────────────────
+
+    /// Cached captures at or under a rel-prefix: rel → (captured, mtime, size).
+    /// One query for the whole subtree (mirrors `get_under`); the caller checks
+    /// (mtime, size) to decide whether a row is still valid.
+    pub fn captures_under(&self, prefix: &str) -> HashMap<String, (i64, i64, i64)> {
+        let conn = self.conn.lock();
+        let (sql, like): (&str, String) = if prefix.is_empty() {
+            (
+                "SELECT rel, captured, mtime, size FROM captures",
+                String::new(),
+            )
+        } else {
+            (
+                "SELECT rel, captured, mtime, size FROM captures WHERE rel = ?1 OR rel LIKE ?2",
+                format!("{prefix}/%"),
+            )
+        };
+        let mut stmt = match conn.prepare(sql) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+        let map = |r: &rusqlite::Row<'_>| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?),
+            ))
+        };
+        let rows = if prefix.is_empty() {
+            stmt.query_map([], map)
+        } else {
+            stmt.query_map(params![prefix, like], map)
+        };
+        match rows {
+            Ok(it) => it.filter_map(|r| r.ok()).collect(),
+            Err(_) => HashMap::new(),
+        }
+    }
+
+    /// Upsert many capture rows (rel, captured, mtime, size) in one transaction.
+    pub fn set_capture_many(&self, rows: &[(String, i64, i64, i64)]) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO captures(rel, captured, mtime, size) VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(rel) DO UPDATE SET captured = ?2, mtime = ?3, size = ?4",
+            )?;
+            for (rel, captured, mtime, size) in rows {
+                stmt.execute(params![rel, captured, mtime, size])?;
+            }
+        }
+        tx.commit()
     }
 
     /// Fetch every decision at or under a rel-path prefix in a SINGLE query.
@@ -247,6 +315,7 @@ impl Catalog {
             let _ = conn.execute("DELETE FROM decisions WHERE rel = ?1", params![rel]);
             let _ = conn.execute("DELETE FROM tags WHERE rel = ?1", params![rel]);
             let _ = conn.execute("DELETE FROM trims WHERE rel = ?1", params![rel]);
+            let _ = conn.execute("DELETE FROM captures WHERE rel = ?1", params![rel]);
         }
     }
 

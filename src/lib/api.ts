@@ -25,6 +25,9 @@ export const api = {
   /** Tiled sprite of frames for decode-free scrubbing (built lazily, cached). */
   videoFilmstrip: (path: string) =>
     invoke<FilmstripInfo>("video_filmstrip", { path }),
+  /** Real capture timestamps (EXIF/creation_time), cached; for sort + grouping. */
+  captureDates: (dir: string, paths: string[]) =>
+    invoke<{ path: string; captured: number }[]>("capture_dates", { dir, paths }),
   getTrim: (path: string) => invoke<[number, number] | null>("get_trim", { path }),
   setTrim: (path: string, inS: number, outS: number) =>
     invoke<void>("set_trim", { path, in_s: inS, out_s: outS }).catch(() => {}),

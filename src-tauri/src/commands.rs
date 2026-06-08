@@ -499,6 +499,113 @@ pub async fn warm_thumbnails(
     Ok(())
 }
 
+#[derive(Serialize)]
+pub struct CaptureDate {
+    pub path: String,
+    pub captured: i64,
+}
+
+/// Real capture timestamps for a set of files — EXIF DateTimeOriginal for
+/// images/RAW, container `creation_time` for video, falling back to the file
+/// mtime when neither is present. Results are cached in the catalog (validated
+/// by mtime+size), so the FIRST call on a folder does the extraction (kept OFF
+/// the folder-open path, which never reads EXIF) and every later call returns
+/// instantly. Extraction runs on the bounded warm pool so it never floods the
+/// USB SSD or starves the foreground.
+#[tauri::command]
+pub async fn capture_dates(
+    state: State<'_, AppState>,
+    catalog: State<'_, Catalog>,
+    dir: String,
+    paths: Vec<String>,
+) -> Result<Vec<CaptureDate>, String> {
+    let root = state.root.lock().clone();
+    let prefix = rel_of(&root, &dir);
+    let cached = catalog.captures_under(&prefix);
+    let ffmpeg = state.ffmpeg.clone();
+
+    struct Pending {
+        path: String,
+        rel: String,
+        mtime: i64,
+        size: i64,
+        kind: Kind,
+    }
+    let mut results: Vec<CaptureDate> = Vec::with_capacity(paths.len());
+    let mut pending: Vec<Pending> = Vec::new();
+    for path in &paths {
+        let p = Path::new(path);
+        let rel = rel_of(&root, path);
+        let (mtime, size) = match std::fs::metadata(p) {
+            Ok(m) => (
+                m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0),
+                m.len() as i64,
+            ),
+            Err(_) => (0, 0),
+        };
+        if let Some(&(captured, cm, cs)) = cached.get(&rel) {
+            if cm == mtime && cs == size {
+                results.push(CaptureDate {
+                    path: path.clone(),
+                    captured,
+                });
+                continue;
+            }
+        }
+        pending.push(Pending {
+            path: path.clone(),
+            rel,
+            mtime,
+            size,
+            kind: media::classify(p),
+        });
+    }
+
+    if !pending.is_empty() {
+        let extracted: Vec<(CaptureDate, (String, i64, i64, i64))> =
+            tauri::async_runtime::spawn_blocking(move || {
+                warm_pool().install(|| {
+                    pending
+                        .par_iter()
+                        .map(|pd| {
+                            let p = Path::new(&pd.path);
+                            let captured = match pd.kind {
+                                Kind::Image | Kind::Raw => media::capture_date(p),
+                                Kind::Video => ffmpeg
+                                    .as_deref()
+                                    .and_then(|ff| video::creation_time(ff, p)),
+                                Kind::Other => None,
+                            }
+                            .unwrap_or(pd.mtime);
+                            (
+                                CaptureDate {
+                                    path: pd.path.clone(),
+                                    captured,
+                                },
+                                (pd.rel.clone(), captured, pd.mtime, pd.size),
+                            )
+                        })
+                        .collect()
+                })
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let rows: Vec<(String, i64, i64, i64)> =
+            extracted.iter().map(|(_, r)| r.clone()).collect();
+        let _ = catalog.set_capture_many(&rows);
+        for (cd, _) in extracted {
+            results.push(cd);
+        }
+    }
+
+    Ok(results)
+}
+
 #[tauri::command]
 pub fn set_rating(
     state: State<'_, AppState>,

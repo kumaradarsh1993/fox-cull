@@ -246,6 +246,51 @@ fn probe_duration(ffmpeg: &Path, src: &Path) -> Option<f64> {
     (secs > 0.0).then_some(secs)
 }
 
+/// Capture time (Unix secs) of a clip from its `creation_time` metadata, parsed
+/// from ffmpeg's `-i` banner. ISO-8601 UTC ("2024-05-01T12:34:56.000000Z").
+/// `None` when absent (e.g. re-encoded clips) so the caller falls back to mtime.
+pub fn creation_time(ffmpeg: &Path, src: &Path) -> Option<i64> {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.arg("-i")
+        .arg(src)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().ok()?;
+    let err = String::from_utf8_lossy(&out.stderr);
+    let idx = err.find("creation_time")?;
+    // After the key: "creation_time   : 2024-05-01T12:34:56.000000Z"
+    let after = &err[idx..];
+    let colon = after.find(':')?;
+    let val = after[colon + 1..].trim_start();
+    let token = val.split_whitespace().next()?;
+    parse_iso(token)
+}
+
+/// Parse "YYYY-MM-DDThh:mm:ss…" (ignoring sub-seconds / trailing Z) to Unix secs.
+fn parse_iso(s: &str) -> Option<i64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let num = |a: usize, z: usize| -> Option<i64> { s.get(a..z)?.parse().ok() };
+    let y = num(0, 4)?;
+    let mo = num(5, 7)?;
+    let d = num(8, 10)?;
+    let h = num(11, 13)?;
+    let mi = num(14, 16)?;
+    let se = num(17, 19)?;
+    if y < 1970 || !(1..=12).contains(&mo) {
+        return None;
+    }
+    Some(crate::media::civil_to_unix(y, mo, d, h, mi, se))
+}
+
 /// Render the sprite: `count` frames evenly spread across the clip (`fps` filter),
 /// each scaled to FILMSTRIP_TILE_W wide, tiled into a `cols x rows` grid. The
 /// `tile` filter flushes a partial last frame at EOF, so short clips still yield

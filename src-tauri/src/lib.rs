@@ -110,6 +110,7 @@ pub fn run() {
             commands::loupe_src,
             commands::video_poster,
             commands::video_filmstrip,
+            commands::capture_dates,
             commands::set_rating,
             commands::set_label,
             commands::set_flag,
