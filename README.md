@@ -1,6 +1,6 @@
 # 🦊 fox-cull
 
-**A fast, lightweight photo & video culler for Windows and macOS.**
+**A fast, lightweight photo & video culler for Windows, macOS & Linux.**
 Sort through thousands of photos quickly — keep the good ones, reject the rest —
 without a subscription, without the bloat.
 
@@ -29,15 +29,25 @@ labels — and does just that one job, fast.
 - **Rate, flag, and tag at speed** — star ratings (1–5), color labels, a
   keep/reject flag, and your own free-form **tags** (e.g. "Diwali"), all from
   the keyboard. Filter by any of them.
+- **Sort & group by real capture date** — order by the date a shot was actually
+  *taken* (from EXIF / video metadata), not the filename, and optionally split
+  the grid into **month** or **week** sections.
 - **Big, clean preview** with a Lightroom-style film-strip (bottom, side, or
-  off — and drag to resize it).
+  off — and drag to resize it). New photos fade in sharp from a soft preview —
+  no jarring thumbnail-to-full pop.
+- **Right-click anything** for a contextual menu — open in your file manager or
+  system player, jump to the next/previous shot, pick / reject, copy the path.
 - **Dim / lights-out focus mode** (`L`) darkens everything but the photo.
 - **Photos always upright** — no more sideways portrait shots from your phone.
 - **Fast on huge phone JPEGs** — thumbnails decode at reduced scale and the
   whole folder pre-loads in the background, so scrolling stays smooth.
 - **Handles RAW** — Nikon `.NEF` and other RAW files preview instantly.
-- **Videos too** — H.264 clips play in the app; HEVC clips (e.g. DJI Osmo
-  Pocket 3) open in your system player in one click.
+- **Real video support** — every clip gets a true poster frame, an in-app player
+  with a **scrub timeline** (hover to preview frames), and **lossless trim &
+  export** (set in/out points, cut without re-encoding). HEVC clips (e.g. DJI
+  Osmo Pocket 3) still get posters and scrubbing, and open in your system player
+  in one click if the webview can't decode them. `Space` plays/pauses,
+  `Shift`+`←`/`→` seeks.
 - **Filter, then bulk-reject** — e.g. show everything below 3 stars, select
   all, reject, then sweep the rejects to the Recycle Bin in one go.
 - **Portable & backup-friendly** — your ratings live in one catalog file you
@@ -73,6 +83,8 @@ Grab the latest build from the **[Releases page](../../releases)**:
 | `Enter` | Toggle big **Focus** view |
 | `G` / `D` | **Grid** / **Details** view |
 | `L` | Dim → lights-out → normal (focus mode) |
+| `Space` | Play / pause the current video |
+| `Shift`+`←` / `Shift`+`→` | Scrub the video back / forward |
 | `1`–`5` | Star rating |
 | `` ` `` | Clear rating |
 | `6` `7` `8` `9` `0` | Color label (blue / purple / red / green / yellow) |
@@ -88,8 +100,10 @@ Grab the latest build from the **[Releases page](../../releases)**:
    "On delete" to **Move to folder** in Settings (⚙): rejects go to a
    `_FoxCull Recycle Bin` at the drive root, keeping their folder structure.
 
-Tip: the **⊞ Subfolders** button (on by default) controls whether a folder
-shows photos from its subfolders too.
+Tip: **⊞ Subfolders** (in the **Filters** menu, on by default) controls whether
+a folder shows photos from its subfolders too. Use the **Sort** and **Group**
+controls next to the view switcher to order by capture date or split the grid
+into month / week sections.
 
 ## Good to know
 
