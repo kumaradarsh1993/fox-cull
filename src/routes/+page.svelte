@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { api } from "$lib/api";
   import { settings } from "$lib/settings.svelte";
-  import { resetThumbs } from "$lib/thumbnail-loader";
+  import { resetThumbs, prefetchLoupe } from "$lib/thumbnail-loader";
   import {
     LABELS,
     LABEL_BY_DIGIT,
@@ -25,6 +25,12 @@
 
   // Long edge we cache grid thumbnails at (matches <Thumb size>); used to warm.
   const THUMB_MAX = 320;
+  // Long edge of the full Focus preview (matches the backend LOUPE_MAX). Used by
+  // "Prepare folder" to pre-generate every shot's big preview, not just the thumb.
+  const LOUPE_MAX = 1920;
+  // How many shots ahead/behind the active one to keep warm in Focus view.
+  const PREFETCH_AHEAD = 3;
+  const PREFETCH_BEHIND = 2;
 
   let drives = $state<TreeDir[]>([]);
   let currentDir = $state<string | null>(null);
@@ -293,6 +299,53 @@
 
   function move(delta: number) {
     setActiveTo(activeIndex + delta);
+  }
+
+  // ── Focus-view preview prefetch ────────────────────────────────────────────
+  // Keep the shots just ahead/behind the active one decoded and warm, biased in
+  // the direction of travel, so ←/→ in Focus is instant and short backtracks
+  // don't re-blur. Videos are skipped (their poster is already warmed elsewhere).
+  let lastPrefetchIndex = 0;
+  function prefetchAroundActive() {
+    if (viewMode !== "loupe" || !view.length) return;
+    const dir = activeIndex >= lastPrefetchIndex ? 1 : -1;
+    lastPrefetchIndex = activeIndex;
+    const tryAt = (i: number) => {
+      const it = view[i];
+      if (it && (it.kind === "image" || it.kind === "raw")) prefetchLoupe(it.path);
+    };
+    for (let k = 1; k <= PREFETCH_AHEAD; k++) tryAt(activeIndex + dir * k);
+    for (let k = 1; k <= PREFETCH_BEHIND; k++) tryAt(activeIndex - dir * k);
+  }
+  // Fire whenever the active shot or the view changes while in Focus.
+  $effect(() => {
+    activeIndex;
+    viewMode;
+    view;
+    prefetchAroundActive();
+  });
+
+  // ── Prepare folder: pre-cache full previews for the whole folder up front ──
+  // The grid warmer only makes small thumbnails; this generates every shot's big
+  // Focus preview (and video posters) so a culling pass through the folder has
+  // zero blur. Runs on the backend's bounded pool; safe to keep working meanwhile.
+  let preparing = $state(false);
+  let prepared = $state(false);
+  async function prepareFolder() {
+    if (!currentDir || preparing || !view.length) return;
+    preparing = true;
+    prepared = false;
+    const dir = currentDir;
+    try {
+      await api.warmThumbnails(view.map((i) => i.path), LOUPE_MAX);
+    } finally {
+      preparing = false;
+      // Only flash "ready" if we're still on the same folder we prepared.
+      if (currentDir === dir) {
+        prepared = true;
+        setTimeout(() => (prepared = false), 2500);
+      }
+    }
   }
 
   function rate(r: number) {
@@ -747,6 +800,15 @@
       <div class="spacer"></div>
 
       <!-- actions (top-right) -->
+      <button
+        class="btn sm"
+        class:on={preparing || prepared}
+        onclick={prepareFolder}
+        disabled={!view.length || preparing}
+        title="Pre-load full-size previews for this whole folder, so Focus view has no loading blur"
+      >
+        {#if preparing}⏳ Preparing…{:else if prepared}✓ Ready{:else}⚡ Prepare{/if}
+      </button>
       <button class="btn sm" onclick={selectAllFiltered} disabled={!view.length} title="Select all in view">Select all{view.length ? ` (${view.length})` : ""}</button>
       <button class="btn sm danger" onclick={rejectSelected} disabled={selected.size === 0} title="Flag the selection as reject">
         Reject{selected.size > 1 ? ` ${selected.size}` : ""}
@@ -957,6 +1019,7 @@
   .zoom .mini { color: var(--text-faint); font-size: 12px; }
   .zoom input { width: 90px; accent-color: var(--accent); }
   .btn.sm { padding: 5px 10px; border-radius: 7px; font-size: 12.5px; }
+  .btn.sm.on { border-color: var(--accent); color: var(--accent); }
 
   .div { flex: 0 0 auto; align-self: stretch; width: 1px; margin: 2px 4px; background: var(--border); }
   .filterwrap { position: relative; }

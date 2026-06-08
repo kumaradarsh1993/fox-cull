@@ -27,6 +27,53 @@ export function resetThumbs() {
   generation++;
   queue.length = 0;
   pending.clear();
+  // Drop the warm decoded-preview window too — its images belong to the folder
+  // we're leaving, and releasing the references lets the webview reclaim them.
+  loupeDecoded.clear();
+  loupeInflight.clear();
+}
+
+// ── loupe (Focus-view) preview prefetch ────────────────────────────────────
+//
+// The blur in Focus view is the time to (a) generate the large 1920px preview
+// (the grid warmer only makes 320px thumbs) and (b) have the webview decode it.
+// We fix both by pre-generating AND pre-decoding the previews for the photos
+// just ahead/behind the one you're on, then HOLDING a reference to each decoded
+// <img> so the webview doesn't evict the bitmap — that's what made going back a
+// few shots re-blur. When Focus later sets the same asset URL, the decode is
+// already warm and it appears instantly.
+const LOUPE_RETAIN = 14; // ~a dozen 1920px previews kept warm (encoded bytes are small)
+const loupeDecoded = new Map<string, HTMLImageElement>(); // path -> decoded image (LRU)
+const loupeInflight = new Set<string>(); // paths currently being prefetched
+
+/** Pre-generate + pre-decode the large Focus preview for `path`, and keep it
+ *  warm. Cheap to call repeatedly (deduped + memoized). Images/RAW only. */
+export function prefetchLoupe(path: string): void {
+  const have = loupeDecoded.get(path);
+  if (have) {
+    // Mark most-recently-used so a backtrack keeps it alive.
+    loupeDecoded.delete(path);
+    loupeDecoded.set(path, have);
+    return;
+  }
+  if (loupeInflight.has(path)) return;
+  loupeInflight.add(path);
+  // loupe_src goes through the shared cap/dedup queue (separate key from grid).
+  enqueue(`loupe:${path}`, () => api.loupeSrc(path))
+    .then((url) => {
+      if (!url) return;
+      const img = new Image();
+      img.decoding = "async";
+      img.src = url;
+      // decode() forces the bitmap to be ready now, not on first paint.
+      img.decode?.().catch(() => {});
+      loupeDecoded.set(path, img);
+      while (loupeDecoded.size > LOUPE_RETAIN) {
+        const oldest = loupeDecoded.keys().next().value as string;
+        loupeDecoded.delete(oldest);
+      }
+    })
+    .finally(() => loupeInflight.delete(path));
 }
 
 /** Shared queue/dedup/cap machinery. `fetchFsPath` resolves to a filesystem path
