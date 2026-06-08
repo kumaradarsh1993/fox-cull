@@ -7,11 +7,13 @@
 
   let src = $state<string | null>(null); // sharp preview (image/raw) or video src
   let lowSrc = $state<string | null>(null); // cached grid thumb shown instantly
+  let hiLoaded = $state(false); // sharp image finished decoding → cross-fade in
   let failed = $state(false);
   let videoErr = $state(false);
 
   // ── video trim state ──
   let vid = $state<HTMLVideoElement | null>(null);
+  let paused = $state(false); // mirrors the element (autoplay starts playing)
   let dur = $state(0);
   let cur = $state(0);
   let inS = $state(0);
@@ -34,8 +36,10 @@
     const it = item;
     src = null;
     lowSrc = null;
+    hiLoaded = false;
     failed = false;
     videoErr = false;
+    paused = false;
     dur = 0;
     cur = 0;
     inS = 0;
@@ -78,6 +82,21 @@
 
   function onMeta() {
     if (vid) dur = vid.duration || 0;
+  }
+
+  // ── playback (exposed to the page's global key handler) ──
+  export function togglePlay() {
+    if (!vid) return;
+    if (vid.paused) vid.play().catch(() => {});
+    else vid.pause();
+  }
+  export function seekBy(d: number) {
+    if (!vid) return;
+    const max = dur || strip?.duration || vid.duration || 0;
+    let t = vid.currentTime + d;
+    if (t < 0) t = 0;
+    if (max > 0 && t > max) t = max;
+    vid.currentTime = t;
   }
 
   // ── timeline scrub: hover previews a frame, drag seeks the real video ──
@@ -184,16 +203,28 @@
     {#if src && !videoErr}
       <div class="vwrap">
         <!-- svelte-ignore a11y_media_has_caption -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
         <video
           bind:this={vid}
           {src}
-          controls
           autoplay
+          onclick={togglePlay}
           onloadedmetadata={onMeta}
           ontimeupdate={onTime}
+          onplay={() => (paused = false)}
+          onpause={() => (paused = true)}
           onerror={() => (videoErr = true)}
         ></video>
         <div class="trim">
+          <div class="playrow">
+            <button class="pp" onclick={togglePlay} title={paused ? "Play (Space)" : "Pause (Space)"}>
+              {paused ? "▶" : "⏸"}
+            </button>
+            <span class="time">{fmt(cur)} <span class="sep">/</span> {fmt(dur)}</span>
+            <span class="spacer"></span>
+            <span class="khint">Space play · Shift+← → seek</span>
+          </div>
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
             class="track"
@@ -245,12 +276,27 @@
     <div class="empty">
       Can't preview this file{item.kind === "other" ? " (unsupported format)" : ""}.
     </div>
-  {:else if src}
-    <img {src} alt={item.name} draggable="false" />
-  {:else if lowSrc}
-    <img class="low" src={lowSrc} alt={item.name} draggable="false" />
   {:else}
-    <div class="empty">loading…</div>
+    <!-- Blur-up: the cached grid thumb fills the frame (blurred), then the sharp
+         preview cross-fades in on top — same box, no small→big jump. -->
+    <div class="stage">
+      {#if lowSrc}
+        <img class="layer ph" class:gone={hiLoaded} src={lowSrc} alt="" draggable="false" />
+      {/if}
+      {#if src}
+        <img
+          class="layer hi"
+          class:shown={hiLoaded}
+          {src}
+          alt={item.name}
+          draggable="false"
+          onload={() => (hiLoaded = true)}
+        />
+      {/if}
+      {#if !lowSrc && !src}
+        <div class="empty">loading…</div>
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -270,8 +316,37 @@
     max-height: 100%;
     object-fit: contain;
   }
-  .low {
-    filter: blur(0.4px);
+  .stage {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+  /* low-res placeholder: scaled to fill the frame, softened */
+  .ph {
+    filter: blur(10px);
+    transform: scale(1.03); /* mask blurred edges bleeding past the frame */
+    transition: opacity 0.25s ease;
+  }
+  .ph.gone {
+    opacity: 0;
+  }
+  /* sharp preview cross-fades in once it has decoded */
+  .hi {
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+  .hi.shown {
+    opacity: 1;
   }
   .empty {
     color: var(--text-faint);
@@ -294,6 +369,38 @@
     background: var(--bg-panel);
     border-top: 1px solid var(--border);
     padding: 8px 12px 10px;
+  }
+  .playrow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 7px;
+  }
+  .playrow .pp {
+    width: 34px;
+    height: 30px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--bg-elev);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1;
+  }
+  .playrow .pp:hover {
+    background: var(--bg-hover);
+  }
+  .playrow .time {
+    font-size: 12.5px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .playrow .time .sep {
+    color: var(--text-faint);
+    margin: 0 1px;
+  }
+  .playrow .khint {
+    font-size: 11px;
+    color: var(--text-faint);
   }
   .track {
     position: relative;

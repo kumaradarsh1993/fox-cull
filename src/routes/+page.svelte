@@ -46,6 +46,7 @@
   let tagMenuOpen = $state(false);
   let catInfo = $state<CatalogInfo | null>(null);
   let gridComp = $state<{ scrollToIndex: (i: number) => void } | null>(null);
+  let loupeComp = $state<{ togglePlay: () => void; seekBy: (d: number) => void } | null>(null);
 
   const HOLD_MS = 850;
   let holdMs = $state(0);
@@ -53,6 +54,11 @@
 
   const basename = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
   let viewMode = $derived(settings.s.viewMode as ViewMode);
+
+  // Folder-grouped, human-numeric path order (IMG_2 < IMG_10, and each
+  // subfolder's shots stay together instead of interleaving by bare filename —
+  // that interleaving was the "random order" on recursive folder loads).
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
   // Real capture timestamps (path → Unix secs), filled lazily after a folder
   // loads so folder-open stays instant. Falls back to file mtime until/unless a
@@ -89,8 +95,9 @@
       if (by === "capture") c = captureOf(a) - captureOf(b);
       else if (by === "date") c = a.mtime - b.mtime;
       else if (by === "size") c = a.size - b.size;
-      else if (by === "type") c = a.kind.localeCompare(b.kind);
-      if (c === 0) c = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+      else if (by === "type") c = collator.compare(a.kind, b.kind);
+      // "name" (and every tie) resolves to folder-grouped numeric path order.
+      if (c === 0) c = collator.compare(a.path, b.path);
       return c * dir;
     });
   });
@@ -470,6 +477,13 @@
   function onkeydown(e: KeyboardEvent) {
     const t = e.target as HTMLElement;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+    // Video playback keys (Focus mode, active clip): Space toggles play/pause,
+    // Shift+←/→ scrubs the clip. Plain ←/→ still move between items (below).
+    if (viewMode === "loupe" && active?.kind === "video" && loupeComp) {
+      if (e.key === " " || e.code === "Space") { loupeComp.togglePlay(); e.preventDefault(); return; }
+      if (e.shiftKey && e.key === "ArrowRight") { loupeComp.seekBy(5); e.preventDefault(); return; }
+      if (e.shiftKey && e.key === "ArrowLeft") { loupeComp.seekBy(-5); e.preventDefault(); return; }
+    }
     if (e.key === "ArrowRight" || e.key === "ArrowDown") { move(1); e.preventDefault(); return; }
     if (e.key === "ArrowLeft" || e.key === "ArrowUp") { move(-1); e.preventDefault(); return; }
     if (e.key === "Enter") { setView(viewMode === "loupe" ? "grid" : "loupe"); e.preventDefault(); return; }
@@ -720,7 +734,7 @@
         {:else if view.length === 0}
           <div class="welcome"><p>Nothing here matches the current filters.</p></div>
         {:else if viewMode === "loupe"}
-          <Loupe item={active} />
+          <Loupe item={active} bind:this={loupeComp} />
         {:else if viewMode === "details"}
           <DetailsView
             items={view}
