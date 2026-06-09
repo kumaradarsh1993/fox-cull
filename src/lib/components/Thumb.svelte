@@ -6,6 +6,7 @@
 
   let src = $state<string | null>(null);
   let failed = $state(false);
+  let loaded = $state(false); // drives the fade-in once the bitmap is painted
 
   let isVideo = $derived(item.kind === "video");
 
@@ -17,6 +18,7 @@
     const it = item;
     src = null;
     failed = false;
+    loaded = false;
     if (it.kind === "other") return;
     let alive = true;
     const p = it.kind === "video" ? loadVideoPoster(it.path) : loadThumb(it.path, size);
@@ -37,7 +39,15 @@
 
 <div class="thumb">
   {#if src}
-    <img class="media" {src} alt={item.name} draggable="false" />
+    <img
+      class="media"
+      class:in={loaded}
+      {src}
+      alt={item.name}
+      draggable="false"
+      decoding="async"
+      onload={() => (loaded = true)}
+    />
     {#if isVideo}<span class="play">▶</span>{/if}
   {:else if isVideo}
     <div class="ph vid">
@@ -67,6 +77,11 @@
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+  }
+  .media.in {
+    opacity: 1;
   }
   .ph {
     color: var(--text-faint);
@@ -74,7 +89,7 @@
     font-weight: 600;
     letter-spacing: 0.5px;
   }
-  .ph.dim { opacity: 0.4; font-size: 18px; }
+  .ph.dim { opacity: 0; }
   .ph.vid {
     flex-direction: column;
     gap: 5px;

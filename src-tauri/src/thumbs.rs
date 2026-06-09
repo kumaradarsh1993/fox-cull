@@ -1,8 +1,17 @@
 //! Orientation-baked, disk-cached thumbnails (and larger loupe previews).
 //!
-//! Cache filename is a hash of (abs path, mtime, size, max-edge, orientation),
-//! so editing/replacing a file or asking for a different size produces a fresh
-//! entry and stale ones are simply never referenced again.
+//! Cache filename is a hash of (abs path, mtime, size, max-edge), so editing or
+//! replacing a file (mtime/size change) or asking for a different size produces a
+//! fresh entry and stale ones are simply never referenced again.
+//!
+//! CRITICAL: orientation is deliberately NOT in the key. Orientation is a property
+//! of the file's bytes, so it cannot change unless mtime/size already does — adding
+//! it to the key bought nothing, but reading it (which OPENS the original file to
+//! parse its EXIF header) on every cache *lookup* turned a cheap of cache hits into
+//! a seek storm against the originals. On a spinning disk, revisiting a folder of
+//! already-cached thumbnails meant hundreds of original-file opens just to rebuild
+//! keys — the "(Not Responding) that recovers if you wait" freeze. We now read
+//! orientation ONLY when actually generating a missing thumbnail.
 
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -14,7 +23,8 @@ use crate::media::{self, Kind};
 
 /// The cache file path for `path` at long-edge `max` (whether or not it exists
 /// yet). Used both by `ensure` and by cleanup-on-delete to find the exact file
-/// to remove. Reads the file's metadata, so call it while the file still exists.
+/// to remove. Reads the file's metadata (a cheap stat), so call it while the file
+/// still exists — but never opens the file, so it stays fast on a spinning disk.
 pub fn cache_path(cache_dir: &Path, path: &Path, max: u32) -> Option<PathBuf> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta
@@ -24,17 +34,15 @@ pub fn cache_path(cache_dir: &Path, path: &Path, max: u32) -> Option<PathBuf> {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let abs = path.to_string_lossy().to_string();
-    let o = media::orientation(path);
-    Some(cache_dir.join(format!("{}.jpg", cache_key(&abs, mtime, meta.len(), max, o))))
+    Some(cache_dir.join(format!("{}.jpg", cache_key(&abs, mtime, meta.len(), max))))
 }
 
-fn cache_key(abs: &str, mtime: i64, size: u64, max: u32, orientation: u16) -> String {
+fn cache_key(abs: &str, mtime: i64, size: u64, max: u32) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     abs.hash(&mut h);
     mtime.hash(&mut h);
     size.hash(&mut h);
     max.hash(&mut h);
-    orientation.hash(&mut h);
     format!("{:016x}", h.finish())
 }
 
@@ -135,11 +143,13 @@ pub fn ensure(cache_dir: &Path, path: &Path, kind: Kind, max: u32) -> Result<Pat
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let abs = path.to_string_lossy().to_string();
-    let o = media::orientation(path);
-    let out = cache_dir.join(format!("{}.jpg", cache_key(&abs, mtime, meta.len(), max, o)));
+    let out = cache_dir.join(format!("{}.jpg", cache_key(&abs, mtime, meta.len(), max)));
     if out.exists() {
         return Ok(out);
     }
+    // Only now — for a thumbnail we actually have to build — do we open the
+    // original to read its EXIF orientation (so it gets baked into the pixels).
+    let o = media::orientation(path);
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())

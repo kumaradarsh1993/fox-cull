@@ -32,9 +32,12 @@ fn warm_threads() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    // Clamped low: this is I/O-bound on a single USB SSD, not CPU-bound, so more
-    // threads just deepen the read queue and stall the foreground. 2–3 is plenty.
-    (cores / 2).clamp(2, 3)
+    // Clamped very low: this is I/O-bound, not CPU-bound, and the worst case is a
+    // single spinning SATA disk (the user's internal drives), where every extra
+    // concurrent original read makes the mechanical head seek-thrash and stalls
+    // the foreground thumbnails the user is actually looking at. 1–2 keeps the
+    // read queue shallow on an HDD while still using both heads of an SSD.
+    (cores / 4).clamp(1, 2)
 }
 
 /// Dedicated, size-bounded rayon pool for warming (NOT the global pool, which

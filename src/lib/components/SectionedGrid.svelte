@@ -90,6 +90,17 @@
     return () => ro.disconnect();
   });
 
+  // Coalesce scroll events to one visible-set recompute per animation frame (see
+  // VirtualGrid) so fast flicks don't thrash the main thread mounting cells.
+  let scrollRAF = 0;
+  function onScroll() {
+    if (scrollRAF) return;
+    scrollRAF = requestAnimationFrame(() => {
+      scrollRAF = 0;
+      if (viewport) scrollTop = viewport.scrollTop;
+    });
+  }
+
   /** Bring a global item index into view (used by keyboard navigation). With
    *  `center`, place it mid-viewport (restores position on return from Focus). */
   export function scrollToIndex(i: number, center = false) {
@@ -109,13 +120,7 @@
   }
 </script>
 
-<div
-  class="vp"
-  bind:this={viewport}
-  onscroll={() => {
-    if (viewport) scrollTop = viewport.scrollTop;
-  }}
->
+<div class="vp" bind:this={viewport} onscroll={onScroll}>
   <div class="canvas" style="height:{totalH}px">
     {#each visible as r (r.key)}
       {#if r.type === "header"}

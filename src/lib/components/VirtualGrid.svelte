@@ -60,6 +60,20 @@
     return () => ro.disconnect();
   });
 
+  // Coalesce scroll events to one read per animation frame. The native scroll
+  // event can fire many times per frame during a fast flick; recomputing the
+  // visible set (and mounting/unmounting cells + their image requests) on each
+  // one is wasted main-thread work that shows up as scroll jank. One rAF-aligned
+  // update per frame keeps the grid smooth.
+  let scrollRAF = 0;
+  function onScroll() {
+    if (scrollRAF) return;
+    scrollRAF = requestAnimationFrame(() => {
+      scrollRAF = 0;
+      if (viewport) scrollTop = viewport.scrollTop;
+    });
+  }
+
   /** Keep a given index visible — used by keyboard navigation. With `center`,
    *  place it mid-viewport (used to restore position when returning from Focus). */
   export function scrollToIndex(i: number, center = false) {
@@ -76,13 +90,7 @@
   }
 </script>
 
-<div
-  class="vp"
-  bind:this={viewport}
-  onscroll={() => {
-    if (viewport) scrollTop = viewport.scrollTop;
-  }}
->
+<div class="vp" bind:this={viewport} onscroll={onScroll}>
   <div class="canvas" style="height:{totalH}px">
     {#each visible as v (v.index)}
       <div
