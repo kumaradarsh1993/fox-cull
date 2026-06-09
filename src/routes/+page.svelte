@@ -61,6 +61,8 @@
   let libInfo = $state<LibraryInfo | null>(null);
   let trashOpen = $state(false);
   let trashItems = $state<TrashItem[]>([]);
+  // Bumped by the tree's ↻ button to make expanded folders recount their badges.
+  let countsGen = $state(0);
   let gridComp = $state<{ scrollToIndex: (i: number, center?: boolean) => void } | null>(null);
   let loupeComp = $state<{ togglePlay: () => void; seekBy: (d: number) => void } | null>(null);
 
@@ -211,6 +213,21 @@
       allTags = await api.listTags();
     } catch {
       allTags = [];
+    }
+  }
+
+  // Recompute the left-pane folder counts (they're cached and never auto-stale,
+  // so this is the manual "I added/removed files" refresh).
+  let recounting = $state(false);
+  async function refreshCounts() {
+    if (recounting) return;
+    recounting = true;
+    try {
+      await api.clearFolderCounts();
+      countsGen++;
+    } finally {
+      // Brief spin so the click feels acknowledged even when it's instant.
+      setTimeout(() => (recounting = false), 400);
     }
   }
 
@@ -747,12 +764,21 @@
   <aside class="tree" style="width:{settings.s.treeWidth}px">
     <div class="tree-head">
       <span class="brand">🦊 fox-cull</span>
-      <button class="btn sm" onclick={openFolderPicker} title="Jump to a folder">Open…</button>
+      <div class="tree-actions">
+        <button
+          class="ico sm"
+          class:spin={recounting}
+          onclick={refreshCounts}
+          title="Recount folders (the counts are cached — refresh after adding or removing files)"
+          aria-label="Recount folders"
+        >↻</button>
+        <button class="btn sm" onclick={openFolderPicker} title="Jump to a folder">Open…</button>
+      </div>
     </div>
     <div class="tree-body">
       {#if drives.length}
         {#each drives as d (d.path)}
-          <TreeNode node={d} {currentDir} onselect={openFolder} />
+          <TreeNode node={d} {currentDir} onselect={openFolder} {countsGen} />
         {/each}
       {:else}
         <p class="hint">No drives detected.</p>
@@ -1066,6 +1092,10 @@
   .app { display: flex; height: 100vh; overflow: hidden; }
   .tree { display: flex; flex-direction: column; background: var(--bg-panel); border-right: 1px solid var(--border); flex: 0 0 auto; min-width: 0; }
   .tree-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+  .tree-actions { display: flex; align-items: center; gap: 6px; }
+  .ico.sm { width: 26px; height: 26px; font-size: 13px; }
+  .ico.spin { animation: spin 0.5s linear; color: var(--accent); border-color: var(--accent); }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .brand { font-weight: 700; }
   .tree-body { overflow-y: auto; padding: 6px; flex: 1; }
   .hint { padding: 10px; color: var(--text-faint); font-size: 12.5px; }

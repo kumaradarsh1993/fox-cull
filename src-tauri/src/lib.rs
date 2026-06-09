@@ -112,6 +112,8 @@ pub fn run() {
             commands::set_library_root,
             commands::list_drives,
             commands::list_tree,
+            commands::folder_counts,
+            commands::clear_folder_counts,
             commands::list_folder_media,
             commands::thumbnail,
             commands::warm_thumbnails,

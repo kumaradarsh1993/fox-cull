@@ -15,6 +15,11 @@ export const api = {
     invoke<LibraryInfo>("set_library_root", { root }),
   listDrives: () => invoke<TreeDir[]>("list_drives"),
   listTree: (dir: string) => invoke<TreeDir[]>("list_tree", { dir }),
+  /** Recursive media counts for the given folders (cached; left-pane badges). */
+  folderCounts: (paths: string[], recompute = false) =>
+    invoke<{ path: string; count: number }[]>("folder_counts", { paths, recompute }),
+  /** Drop every cached folder count so the badges recompute. */
+  clearFolderCounts: () => invoke<void>("clear_folder_counts").catch(() => {}),
   listFolderMedia: (dir: string, recursive: boolean) =>
     invoke<MediaItem[]>("list_folder_media", { dir, recursive }),
   thumbnail: (path: string, max: number) =>

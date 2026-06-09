@@ -127,7 +127,61 @@ impl Catalog {
             )",
             [],
         )?;
+        // Cached recursive media counts per folder, for the left-pane badges
+        // (Lightroom-style "Folder (123)"). Keyed by ABSOLUTE path — this is a
+        // machine-local performance cache, not portable culling data, so it's
+        // cheap to regenerate and never needs to survive a drive-letter change.
+        // The user refreshes it manually; we don't auto-invalidate.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS dir_counts (
+                path        TEXT PRIMARY KEY,
+                count       INTEGER NOT NULL,
+                computed_at INTEGER NOT NULL
+            )",
+            [],
+        )?;
         Ok(conn)
+    }
+
+    // ── per-folder media counts (left-pane badges) ──────────────────────────
+
+    /// All cached folder counts: absolute path → recursive media count. Small
+    /// (one row per folder ever counted); the caller picks the paths it needs.
+    pub fn get_counts(&self) -> HashMap<String, i64> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare("SELECT path, count FROM dir_counts") {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+        let rows =
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)));
+        match rows {
+            Ok(it) => it.filter_map(|r| r.ok()).collect(),
+            Err(_) => HashMap::new(),
+        }
+    }
+
+    /// Upsert many (absolute path, count) rows in one transaction.
+    pub fn set_counts(&self, rows: &[(String, i64)]) -> rusqlite::Result<()> {
+        let ts = now();
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO dir_counts(path, count, computed_at) VALUES(?1, ?2, ?3)
+                 ON CONFLICT(path) DO UPDATE SET count = ?2, computed_at = ?3",
+            )?;
+            for (path, c) in rows {
+                stmt.execute(params![path, c, ts])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Drop every cached count (the user asked to recompute folder badges).
+    pub fn clear_counts(&self) {
+        let conn = self.conn.lock();
+        let _ = conn.execute("DELETE FROM dir_counts", []);
     }
 
     /// Stored trim in/out (seconds) for a clip, if any.

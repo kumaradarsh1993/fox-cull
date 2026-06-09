@@ -318,29 +318,31 @@ pub fn set_library_root(
     })
 }
 
-/// Immediate subdirectories of `dir` (for the lazy folder tree). Dotfolders are
-/// hidden; each entry reports whether it has subfolders so the UI can show an
-/// expand affordance without eagerly walking the whole tree.
+/// Immediate subdirectories of `dir` (for the lazy folder tree). Dotfolders and
+/// our own `_FoxCull` library are hidden.
+///
+/// `has_children` is reported **optimistically** (always true): probing it
+/// eagerly meant an extra `read_dir` PER child, an N+1 stat storm that made
+/// expanding a folder on the USB SSD take seconds. We instead show the expand
+/// chevron for every folder and let the UI hide it the moment an expand turns up
+/// no subfolders — one cheap `read_dir` per expand instead of one per sibling.
 #[tauri::command]
 pub fn list_tree(dir: String) -> Result<Vec<TreeDir>, String> {
     let p = Path::new(&dir);
     let read = std::fs::read_dir(p).map_err(|e| format!("read_dir failed: {e}"))?;
     let mut out: Vec<TreeDir> = read
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
+        // file_type() is free on Windows (cached from the enumeration) — no stat.
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
+            if name.starts_with('.') || name.eq_ignore_ascii_case(LIB_DIRNAME) {
                 return None;
             }
-            let path = e.path();
-            let has_children = std::fs::read_dir(&path)
-                .map(|mut rd| rd.any(|c| c.map(|c| c.path().is_dir()).unwrap_or(false)))
-                .unwrap_or(false);
             Some(TreeDir {
                 name,
-                path: path.to_string_lossy().to_string(),
-                has_children,
+                path: e.path().to_string_lossy().to_string(),
+                has_children: true,
             })
         })
         .collect();
@@ -401,6 +403,98 @@ fn collect(dir: &Path, recursive: bool, out: &mut Vec<(PathBuf, i64, u64)>) {
             }
         }
     }
+}
+
+/// Recursively count media files under `dir` (extension classification only — no
+/// metadata reads), skipping dotfolders, our own `_FoxCull` library and Windows
+/// reparse points, exactly like `collect`. Powers the left-pane folder badges.
+fn count_media(dir: &Path) -> usize {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    let mut n = 0usize;
+    for entry in rd.flatten() {
+        let ft = match entry.file_type() {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            let dname = entry.file_name().to_string_lossy().to_string();
+            if dname.starts_with('.') || dname.to_ascii_lowercase().starts_with("_foxcull") {
+                continue;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                const REPARSE: u32 = 0x400;
+                if let Ok(md) = entry.metadata() {
+                    if md.file_attributes() & REPARSE != 0 {
+                        continue;
+                    }
+                }
+            }
+            n += count_media(&entry.path());
+        } else if ft.is_file() && media::is_media(&entry.path()) {
+            n += 1;
+        }
+    }
+    n
+}
+
+#[derive(Serialize)]
+pub struct FolderCount {
+    pub path: String,
+    pub count: i64,
+}
+
+/// Recursive media counts for a set of folders (the left-pane badges). Returns
+/// cached counts instantly; missing ones are computed in parallel on the bounded
+/// warm pool and cached, so the FIRST expand of a folder fills its children's
+/// badges a moment later and every later run is instant. `recompute` ignores the
+/// cache (the manual "↻ recount" path). Keyed by absolute path — a regenerable
+/// local cache, never auto-invalidated, so stale counts only change on refresh.
+#[tauri::command]
+pub async fn folder_counts(
+    catalog: State<'_, Catalog>,
+    paths: Vec<String>,
+    recompute: bool,
+) -> Result<Vec<FolderCount>, String> {
+    let cached = if recompute {
+        HashMap::new()
+    } else {
+        catalog.get_counts()
+    };
+    let mut out: Vec<FolderCount> = Vec::with_capacity(paths.len());
+    let mut need: Vec<String> = Vec::new();
+    for p in paths {
+        match cached.get(&p) {
+            Some(c) => out.push(FolderCount { path: p, count: *c }),
+            None => need.push(p),
+        }
+    }
+    if !need.is_empty() {
+        let computed: Vec<(String, i64)> = tauri::async_runtime::spawn_blocking(move || {
+            warm_pool().install(|| {
+                need.par_iter()
+                    .map(|abs| (abs.clone(), count_media(Path::new(abs)) as i64))
+                    .collect()
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let _ = catalog.set_counts(&computed);
+        for (path, count) in computed {
+            out.push(FolderCount { path, count });
+        }
+    }
+    Ok(out)
+}
+
+/// Drop every cached folder count so the badges recompute (the tree's ↻ button).
+#[tauri::command]
+pub fn clear_folder_counts(catalog: State<'_, Catalog>) {
+    catalog.clear_counts();
 }
 
 /// Top-level browse roots: drive letters on Windows, mounted volumes + home on
