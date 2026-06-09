@@ -117,6 +117,7 @@ pub fn run() {
             commands::list_folder_media,
             commands::thumbnail,
             commands::warm_thumbnails,
+            commands::cancel_warm,
             commands::loupe_src,
             commands::video_poster,
             commands::video_filmstrip,

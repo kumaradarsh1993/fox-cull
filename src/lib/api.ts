@@ -27,6 +27,8 @@ export const api = {
   /** Fire-and-forget: pre-warm the whole folder's thumbnails in parallel. */
   warmThumbnails: (paths: string[], max: number) =>
     invoke<void>("warm_thumbnails", { paths, max }).catch(() => {}),
+  /** Abandon in-flight background warming (free the SSD for previews/playback). */
+  cancelWarm: () => invoke<void>("cancel_warm").catch(() => {}),
   loupeSrc: (path: string) => invoke<string>("loupe_src", { path }),
   /** Cached poster frame (filesystem path) for a video, via bundled ffmpeg. */
   videoPoster: (path: string) => invoke<string>("video_poster", { path }),

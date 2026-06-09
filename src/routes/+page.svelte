@@ -433,6 +433,12 @@
   let prevViewMode: ViewMode = "grid";
   $effect(() => {
     const vm = viewMode;
+    if (vm === "loupe" && prevViewMode !== "loupe") {
+      // Entering Focus: abandon background warming so the big preview generation
+      // and (especially) video playback get the USB SSD's read bandwidth instead
+      // of stuttering behind the warmer.
+      api.cancelWarm();
+    }
     if (vm !== "loupe" && prevViewMode === "loupe") {
       const i = activeIndex;
       requestAnimationFrame(() => gridComp?.scrollToIndex(i, true));

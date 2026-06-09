@@ -32,7 +32,9 @@ fn warm_threads() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    (cores / 2).clamp(2, 4)
+    // Clamped low: this is I/O-bound on a single USB SSD, not CPU-bound, so more
+    // threads just deepen the read queue and stall the foreground. 2–3 is plenty.
+    (cores / 2).clamp(2, 3)
 }
 
 /// Dedicated, size-bounded rayon pool for warming (NOT the global pool, which
@@ -739,11 +741,23 @@ pub async fn video_filmstrip(
     .map_err(|e| e.to_string())?
 }
 
-/// Proactively generate (and disk-cache) grid thumbnails for a whole folder in
-/// parallel across all cores, so scrolling the grid/filmstrip is smooth instead
-/// of decoding lazily under the user's cursor. Fire-and-forget from the frontend
-/// right after a folder loads. Cancels itself if the user switches folders (the
-/// generation token moved on). Videos/unknowns are skipped.
+/// How many items the background warmer pre-generates per folder. Bounded so a
+/// huge folder can't keep the USB SSD's read queue saturated for a minute — past
+/// this the viewport-prioritized on-demand loader handles whatever you scroll to.
+const WARM_CAP: usize = 600;
+
+/// Proactively generate (and disk-cache) grid thumbnails for the FIRST part of a
+/// folder, so initial scrolling is smooth instead of decoding lazily under the
+/// cursor. Fire-and-forget from the frontend right after a folder loads; cancels
+/// itself when the user switches folders (the generation token moved on).
+///
+/// CRITICAL: this only warms ordinary images, and only the first `WARM_CAP` of
+/// them. Videos (ffmpeg poster extraction) and RAW (whole-file ~25 MB reads) are
+/// deliberately LEFT to on-demand loading — pre-reading a whole folder of those
+/// pinned the USB SSD's serial command queue for ~a minute and starved the
+/// foreground thumbnails you were actually looking at (the "not responding that
+/// recovers if you wait" bug). On-demand stays bounded to the viewport, so heavy
+/// reads only happen for the handful of RAW/video cells actually on screen.
 #[tauri::command]
 pub async fn warm_thumbnails(
     state: State<'_, AppState>,
@@ -753,32 +767,63 @@ pub async fn warm_thumbnails(
     let my_gen = state.warm_gen.fetch_add(1, Ordering::SeqCst) + 1;
     let gen = state.warm_gen.clone();
     let cache_dir = state.cache_dir.lock().clone();
-    let ffmpeg = state.ffmpeg.clone();
-    let _ = tauri::async_runtime::spawn_blocking(move || {
+    // Only the cheap kind (ordinary images), only the first WARM_CAP.
+    let work: Vec<PathBuf> = paths
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| matches!(media::classify(p), Kind::Image))
+        .take(WARM_CAP)
+        .collect();
+    let total = work.len();
+    let t0 = Instant::now();
+    crate::log::line(&format!(
+        "WARM start images={} (of {} files) max={} gen={}",
+        total,
+        paths.len(),
+        max,
+        my_gen
+    ));
+    let done = tauri::async_runtime::spawn_blocking(move || {
+        let count = std::sync::atomic::AtomicUsize::new(0);
         // Run on the small dedicated pool so we never monopolize the cores the
         // foreground (loupe + visible cells) needs.
         warm_pool().install(|| {
-            paths.par_iter().for_each(|path| {
+            work.par_iter().for_each(|p| {
                 // Abandon the moment a newer folder selection supersedes us.
                 if gen.load(Ordering::SeqCst) != my_gen {
                     return;
                 }
-                let p = PathBuf::from(path);
-                match media::classify(&p) {
-                    Kind::Other => {}
-                    // Videos: pre-extract a poster frame (cached on the SSD).
-                    Kind::Video => {
-                        let _ = video::ensure_poster(&cache_dir, ffmpeg.as_deref(), &p);
-                    }
-                    kind => {
-                        let _ = thumbs::ensure(&cache_dir, &p, kind, max);
-                    }
+                if thumbs::ensure(&cache_dir, p, Kind::Image, max).is_ok() {
+                    count.fetch_add(1, Ordering::Relaxed);
                 }
             });
         });
+        count.load(Ordering::Relaxed)
     })
-    .await;
+    .await
+    .unwrap_or(0);
+    crate::log::line(&format!(
+        "WARM done warmed={}/{} elapsed={}ms gen={}{}",
+        done,
+        total,
+        t0.elapsed().as_millis(),
+        my_gen,
+        if state.warm_gen.load(Ordering::SeqCst) != my_gen {
+            " (cancelled)"
+        } else {
+            ""
+        }
+    ));
     Ok(())
+}
+
+/// Abandon any in-flight background warming (bump the generation token). Called
+/// when the user enters Focus / starts a video, so previews and video playback
+/// get the USB SSD's read bandwidth to themselves instead of stuttering behind
+/// the warmer.
+#[tauri::command]
+pub fn cancel_warm(state: State<'_, AppState>) {
+    state.warm_gen.fetch_add(1, Ordering::SeqCst);
 }
 
 #[derive(Serialize)]
