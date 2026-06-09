@@ -4,12 +4,15 @@ import type {
   TreeDir,
   MediaItem,
   TrashOutcome,
-  CatalogInfo,
+  TrashItem,
+  LibraryInfo,
   FilmstripInfo,
 } from "./types";
 
 export const api = {
-  setLibraryRoot: (root: string) => invoke<void>("set_library_root", { root }),
+  /** Activate the per-drive library for `root` and return where it lives. */
+  setLibraryRoot: (root: string) =>
+    invoke<LibraryInfo>("set_library_root", { root }),
   listDrives: () => invoke<TreeDir[]>("list_drives"),
   listTree: (dir: string) => invoke<TreeDir[]>("list_tree", { dir }),
   listFolderMedia: (dir: string, recursive: boolean) =>
@@ -52,11 +55,14 @@ export const api = {
     invoke<void>("remove_tag", { paths, tag }),
   listTags: () => invoke<[string, number][]>("list_tags"),
   listRejected: () => invoke<string[]>("list_rejected"),
-  disposeRejected: (paths: string[], mode: string, dest: string | null) =>
-    invoke<TrashOutcome>("dispose_rejected", { paths, mode, dest }),
-  catalogInfo: () => invoke<CatalogInfo>("catalog_info"),
-  setCatalogDir: (dir: string) => invoke<string>("set_catalog_dir", { dir }),
-  resetCatalogDir: () => invoke<string>("reset_catalog_dir"),
+  disposeRejected: (paths: string[], mode: string) =>
+    invoke<TrashOutcome>("dispose_rejected", { paths, mode }),
+  /** In-app, per-drive Trash (folder-mode deletes). */
+  listTrash: () => invoke<TrashItem[]>("list_trash"),
+  restoreTrash: (stored: string[]) =>
+    invoke<{ restored: number; failed: string[] }>("restore_trash", { stored }),
+  purgeTrash: (stored: string[]) => invoke<number>("purge_trash", { stored }),
+  libraryInfo: () => invoke<LibraryInfo>("library_info"),
   reveal: (path: string) => invoke<void>("reveal", { path }).catch(() => {}),
   openExternal: (path: string) =>
     invoke<void>("open_external", { path }).catch(() => {}),

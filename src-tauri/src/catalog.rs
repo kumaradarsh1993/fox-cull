@@ -25,6 +25,14 @@ pub struct Decision {
     pub flag: Option<String>, // "pick" | "reject" | None
 }
 
+#[derive(Serialize, Clone)]
+pub struct TrashRow {
+    pub stored: String,
+    pub orig: String,
+    pub name: String,
+    pub deleted_at: i64,
+}
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -102,6 +110,20 @@ impl Catalog {
                 captured INTEGER NOT NULL,
                 mtime    INTEGER NOT NULL,
                 size     INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        // In-app Trash: files moved into the per-drive recycle folder by a
+        // folder-mode delete. `stored` = path within the recycle dir; `orig` =
+        // original path relative to the drive root (for Restore); `deleted_at`
+        // drives the "most recently rejected first" sort. Permanent purge or a
+        // successful restore removes the row.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS trash (
+                stored     TEXT PRIMARY KEY,
+                orig       TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                deleted_at INTEGER NOT NULL
             )",
             [],
         )?;
@@ -392,5 +414,57 @@ impl Catalog {
             }
         }
         tx.commit()
+    }
+
+    // ── trash (in-app, per-drive recycle) ─────────────────────────────────────
+
+    /// Record many disposed files in one transaction: (stored, orig, name, at).
+    pub fn add_trash_many(
+        &self,
+        rows: &[(String, String, String, i64)],
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO trash(stored, orig, name, deleted_at) VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(stored) DO UPDATE SET orig = ?2, name = ?3, deleted_at = ?4",
+            )?;
+            for (stored, orig, name, at) in rows {
+                stmt.execute(params![stored, orig, name, at])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// All trashed files, most recently rejected first.
+    pub fn list_trash(&self) -> Vec<TrashRow> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn
+            .prepare("SELECT stored, orig, name, deleted_at FROM trash ORDER BY deleted_at DESC")
+        {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |r| {
+            Ok(TrashRow {
+                stored: r.get(0)?,
+                orig: r.get(1)?,
+                name: r.get(2)?,
+                deleted_at: r.get(3)?,
+            })
+        });
+        match rows {
+            Ok(it) => it.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Forget trash rows (after a successful restore or permanent purge).
+    pub fn remove_trash(&self, stored: &[String]) {
+        let conn = self.conn.lock();
+        for s in stored {
+            let _ = conn.execute("DELETE FROM trash WHERE stored = ?1", params![s]);
+        }
     }
 }

@@ -65,22 +65,28 @@ pub fn run() {
 
             log::init(data_dir.join("fox-cull.log"));
 
-            // The catalog may have been relocated onto the user's SSD; honor the
-            // saved path if its parent still exists, else fall back to default.
+            // Startup catalog: honor a legacy relocated catalog if it still
+            // EXISTS (used as the migration seed), else the app-data default.
+            // The real per-drive library is activated on the first folder open
+            // (set_library_root), which swaps the catalog/cache/recycle.
             let cfg = config::load(&data_dir);
             let default_catalog = data_dir.join("catalog.sqlite");
             let catalog_path = cfg
                 .catalog_path
                 .as_ref()
                 .map(PathBuf::from)
-                .filter(|p| p.parent().map(|par| par.is_dir()).unwrap_or(false))
+                .filter(|p| p.is_file())
                 .unwrap_or_else(|| default_catalog.clone());
 
-            // The thumbnail/poster cache lives next to the catalog, so when the
-            // catalog is on the SSD the cache is too (generated once, shared
-            // across machines). Falls back to app-data for the default catalog.
+            // Cache + recycle live beside the catalog (a `_FoxCull` library
+            // folder once a drive is active; app-data before that).
             let cache_dir = commands::cache_dir_for(&catalog_path);
             std::fs::create_dir_all(&cache_dir)?;
+            let lib_dir = catalog_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| data_dir.clone());
+            let recycle_dir = lib_dir.join("recycle");
 
             let catalog = Catalog::open(&catalog_path)
                 .map_err(|e| format!("failed to open catalog: {e}"))?;
@@ -95,6 +101,8 @@ pub fn run() {
                 cache_dir: Mutex::new(cache_dir),
                 data_root: data_dir,
                 catalog_path: Mutex::new(catalog_path),
+                lib_dir: Mutex::new(lib_dir),
+                recycle_dir: Mutex::new(recycle_dir),
                 ffmpeg: video::ffmpeg_path(),
                 warm_gen: Arc::new(AtomicU64::new(0)),
             });
@@ -126,9 +134,10 @@ pub fn run() {
             commands::trim_video,
             commands::list_rejected,
             commands::dispose_rejected,
-            commands::catalog_info,
-            commands::set_catalog_dir,
-            commands::reset_catalog_dir,
+            commands::list_trash,
+            commands::restore_trash,
+            commands::purge_trash,
+            commands::library_info,
             commands::reveal,
             commands::open_external,
             commands::folder_writable,

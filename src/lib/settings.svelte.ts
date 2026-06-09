@@ -43,7 +43,7 @@ const DEFAULTS: AppSettings = {
   groupBy: "none",
   typeFilter: "all",
   includeSub: true,
-  deleteMode: "recycle",
+  deleteMode: "folder",
   rejectFolder: null,
   lastDir: null,
   lastActivePath: null,

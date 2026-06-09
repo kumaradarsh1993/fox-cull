@@ -24,10 +24,28 @@ export interface TrashOutcome {
   errors: string[];
 }
 
-export interface CatalogInfo {
+export interface LibraryInfo {
+  /** Drive/volume root the library belongs to (catalog keys are relative to it). */
+  root: string;
+  /** The active library folder: `<drive>/_FoxCull` or an app-data fallback. */
+  dir: string;
+  catalog: string;
+  recycle: string;
+  /** True if on the drive itself; false = app-data fallback (read-only mount). */
+  on_drive: boolean;
+  /** Whether the drive root is writable (proxy for "can delete here"). */
+  writable: boolean;
+}
+
+export interface TrashItem {
+  stored: string;
+  orig: string;
+  /** Absolute path of the file inside the recycle folder (for its thumbnail). */
   path: string;
-  data_root: string;
-  is_default: boolean;
+  name: string;
+  kind: "image" | "raw" | "video" | "other";
+  ext: string;
+  deleted_at: number;
 }
 
 /** A tiled sprite of frames for decode-free video scrubbing (Tier 2). */

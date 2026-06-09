@@ -50,9 +50,11 @@ labels — and does just that one job, fast.
   `Shift`+`←`/`→` seeks.
 - **Filter, then bulk-reject** — e.g. show everything below 3 stars, select
   all, reject, then sweep the rejects to the Recycle Bin in one go.
-- **Portable & backup-friendly** — your ratings live in one catalog file you
-  can move onto your SSD next to the photos and carry between machines. The app
-  itself can run portable from a USB stick / SSD too (see below).
+- **Per-drive & portable** — each drive keeps its own catalog, preview cache and
+  recycle bin together in a `_FoxCull` folder at its root, so your ratings and
+  deletions travel with the drive between machines. The app itself can run
+  portable from a USB stick / SSD too (see below). See
+  [STORAGE.md](STORAGE.md) for exactly what's stored where.
 
 ## Download & install
 
@@ -95,10 +97,11 @@ Grab the latest build from the **[Releases page](../../releases)**:
 4. Use the **filter bar** to narrow down (e.g. only rejected, 3+ stars, or a
    tag), **Select all**, and **Reject** them in bulk. Add a tag to the selected
    photo(s) by typing in the **+ tag** box in the bottom info bar.
-5. When you're ready, **hold the Delete button** — the rejects move to your
-   Recycle Bin / Trash (recoverable), freeing up space. Prefer a folder? Switch
-   "On delete" to **Move to folder** in Settings (⚙): rejects go to a
-   `_FoxCull Recycle Bin` at the drive root, keeping their folder structure.
+5. When you're ready, **hold the Delete button** to sweep the rejects. By default
+   they go to the **in-app Trash** (a `_FoxCull/recycle` folder on that drive) —
+   open **♻ Trash** any time to preview them, **restore** one to its original
+   spot, or **delete forever**. Prefer the OS bin? Switch "On delete" to
+   **System Recycle Bin** in Settings (⚙).
 
 Tip: **⊞ Subfolders** (in the **Filters** menu, on by default) controls whether
 a folder shows photos from its subfolders too. Use the **Sort** and **Group**
@@ -107,11 +110,11 @@ into month / week sections.
 
 ## Good to know
 
-- **Ratings live in fox-cull only.** They're stored in the app's own catalog
-  file, not written into your photo files, so they won't show up in other apps
-  (and won't touch your originals). You can **move that catalog** anywhere
-  (Settings → Catalog → Move…) — e.g. onto your SSD beside the photos — so it
-  backs up with them and follows you to another computer.
+- **Ratings live in fox-cull only.** They're stored in the app's own catalog (a
+  `_FoxCull` folder on each drive), not written into your photo files, so they
+  won't show up in other apps and won't touch your originals. Because the catalog
+  lives on the drive, it backs up with your photos and follows the drive to
+  another computer. Full details: [STORAGE.md](STORAGE.md).
 - **Read-only drives:** if a drive is mounted read-only (e.g. an NTFS SSD on a
   Mac without a write driver), culling and rating still work — only the final
   delete sweep is disabled, with a note explaining why.

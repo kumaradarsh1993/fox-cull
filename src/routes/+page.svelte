@@ -9,7 +9,8 @@
     LABEL_VAR,
     type MediaItem,
     type TreeDir,
-    type CatalogInfo,
+    type LibraryInfo,
+    type TrashItem,
   } from "$lib/types";
   import TreeNode from "$lib/components/TreeNode.svelte";
   import Thumb from "$lib/components/Thumb.svelte";
@@ -19,6 +20,7 @@
   import VirtualStrip from "$lib/components/VirtualStrip.svelte";
   import DetailsView from "$lib/components/DetailsView.svelte";
   import ContextMenu, { type MenuEntry } from "$lib/components/ContextMenu.svelte";
+  import TrashPanel from "$lib/components/TrashPanel.svelte";
 
   type FlagFilter = "all" | "pick" | "reject" | "unflagged";
   type ViewMode = "grid" | "details" | "loupe";
@@ -56,7 +58,9 @@
   let dimLevel = $state(0); // 0 normal · 1 dim panels · 2 lights out
   let settingsOpen = $state(false);
   let filtersOpen = $state(false);
-  let catInfo = $state<CatalogInfo | null>(null);
+  let libInfo = $state<LibraryInfo | null>(null);
+  let trashOpen = $state(false);
+  let trashItems = $state<TrashItem[]>([]);
   let gridComp = $state<{ scrollToIndex: (i: number) => void } | null>(null);
   let loupeComp = $state<{ togglePlay: () => void; seekBy: (d: number) => void } | null>(null);
 
@@ -152,7 +156,7 @@
       drives = [];
     }
     try {
-      catInfo = await api.catalogInfo();
+      libInfo = await api.libraryInfo();
     } catch {
       /* */
     }
@@ -187,7 +191,7 @@
     captureMap = {};
     capturesDir = null;
     try {
-      await api.setLibraryRoot(rootForDir(dir));
+      libInfo = await api.setLibraryRoot(rootForDir(dir));
       items = await api.listFolderMedia(dir, settings.s.includeSub);
       writable = await api.folderWritable(dir);
     } catch (e) {
@@ -524,14 +528,9 @@
   async function executeDelete() {
     const paths = await api.listRejected();
     if (!paths.length) return;
-    let dest = settings.s.rejectFolder;
-    // "folder" mode with no explicit folder → backend auto-targets a per-drive
-    // "_FoxCull Recycle Bin" mirroring the structure. No prompt needed.
-    await api.disposeRejected(
-      paths,
-      settings.s.deleteMode,
-      settings.s.deleteMode === "folder" ? dest : null,
-    );
+    // "folder" → the active drive's _FoxCull/recycle (recoverable in-app Trash);
+    // "recycle" → the OS Recycle Bin / Trash.
+    await api.disposeRejected(paths, settings.s.deleteMode);
     // Stay where we were — after the rejected shots vanish, the same index lands
     // on the next surviving photo, not back at the top of the folder.
     if (currentDir) await openFolder(currentDir, { selectIndex: activeIndex });
@@ -571,29 +570,24 @@
     window.addEventListener("pointerup", up);
   }
 
-  async function chooseRejectFolder() {
-    const f = await api.pickFolder();
-    if (f) await settings.set({ rejectFolder: f });
-  }
-  async function moveCatalog() {
-    const d = await api.pickFolder();
-    if (!d) return;
+  // ── in-app Trash (per-drive recycle folder) ──────────────────────────────
+  async function openTrash() {
     try {
-      await api.setCatalogDir(d);
-      catInfo = await api.catalogInfo();
-      if (currentDir) await openFolder(currentDir);
-    } catch (e) {
-      console.error(e);
+      trashItems = await api.listTrash();
+    } catch {
+      trashItems = [];
     }
+    trashOpen = true;
   }
-  async function resetCatalog() {
-    try {
-      await api.resetCatalogDir();
-      catInfo = await api.catalogInfo();
-      if (currentDir) await openFolder(currentDir);
-    } catch (e) {
-      console.error(e);
-    }
+  async function restoreFromTrash(stored: string[]) {
+    await api.restoreTrash(stored);
+    trashItems = await api.listTrash();
+    // A restored file may belong to the open folder — refresh it.
+    if (currentDir) await openFolder(currentDir, { selectIndex: activeIndex });
+  }
+  async function purgeFromTrash(stored: string[]) {
+    await api.purgeTrash(stored);
+    trashItems = await api.listTrash();
   }
 
   function onkeydown(e: KeyboardEvent) {
@@ -825,6 +819,7 @@
         <span class="hold-fill" style="width:{(holdMs / HOLD_MS) * 100}%"></span>
         <span class="hold-lbl">🗑 Delete{rejectedCount ? ` ${rejectedCount}` : ""} <em>(hold)</em></span>
       </button>
+      <button class="btn sm" onclick={openTrash} title="View deleted items — restore or remove permanently">♻ Trash</button>
       <button class="ico gear" class:on={settingsOpen} onclick={() => (settingsOpen = !settingsOpen)} title="Settings">⚙</button>
     </div>
 
@@ -846,30 +841,35 @@
         </div>
         <div class="row"><span>On delete</span>
           <div class="seg">
-            <button class="chip" class:on={settings.s.deleteMode === "recycle"} onclick={() => settings.set({ deleteMode: "recycle" })}>Recycle Bin</button>
-            <button class="chip" class:on={settings.s.deleteMode === "folder"} onclick={() => settings.set({ deleteMode: "folder" })}>Move to folder</button>
+            <button class="chip" class:on={settings.s.deleteMode === "folder"} onclick={() => settings.set({ deleteMode: "folder" })} title="Move to this drive's _FoxCull recycle folder — recoverable in the in-app Trash">In-app Trash</button>
+            <button class="chip" class:on={settings.s.deleteMode === "recycle"} onclick={() => settings.set({ deleteMode: "recycle" })} title="Send to the operating system's Recycle Bin / Trash">System Recycle Bin</button>
           </div>
         </div>
-        {#if settings.s.deleteMode === "folder"}
+        <div class="row"><span>Trash</span>
+          <button class="btn sm" onclick={() => { settingsOpen = false; openTrash(); }}>🗑 Open Trash…</button>
+        </div>
+        <div class="row"><span>Library</span>
+          {#if libInfo}
+            <button class="btn sm" onclick={() => libInfo && api.reveal(libInfo.catalog)} title="Show the library folder in your file manager">Reveal</button>
+          {/if}
+        </div>
+        {#if libInfo}
           <div class="row sub">
-            <span class="path" title={settings.s.rejectFolder ?? ""}>{settings.s.rejectFolder ? basename(settings.s.rejectFolder) : "Auto: _FoxCull Recycle Bin (drive root)"}</span>
-            <div class="seg">
-              <button class="btn sm" onclick={chooseRejectFolder}>Choose…</button>
-              {#if settings.s.rejectFolder}<button class="btn sm" onclick={() => settings.set({ rejectFolder: null })}>Auto</button>{/if}
-            </div>
+            <span class="path" title={libInfo.dir}>{libInfo.dir}</span>
+            <span class="tag">{libInfo.on_drive ? "on drive" : "app-data (read-only mount)"}</span>
           </div>
         {/if}
-        <div class="row"><span>Catalog</span>
-          <div class="seg">
-            <button class="btn sm" onclick={moveCatalog}>Move…</button>
-            {#if catInfo && !catInfo.is_default}<button class="btn sm" onclick={resetCatalog}>Default</button>{/if}
-          </div>
-        </div>
-        {#if catInfo}
-          <div class="row sub"><span class="path" title={catInfo.path}>{catInfo.path}</span></div>
-        {/if}
-        <div class="row hintrow">Press <kbd>L</kbd> for dim / lights-out · <kbd>G</kbd> grid · <kbd>D</kbd> details.</div>
+        <div class="row hintrow">Each drive keeps its own catalog, preview cache &amp; recycle in a <code>_FoxCull</code> folder. Press <kbd>L</kbd> dim · <kbd>G</kbd> grid · <kbd>D</kbd> details.</div>
       </div>
+    {/if}
+
+    {#if trashOpen}
+      <TrashPanel
+        items={trashItems}
+        onclose={() => (trashOpen = false)}
+        onrestore={restoreFromTrash}
+        onpurge={purgeFromTrash}
+      />
     {/if}
 
     <!-- body: viewport (+ optional right filmstrip) -->

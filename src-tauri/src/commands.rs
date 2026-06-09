@@ -59,8 +59,14 @@ pub struct AppState {
     /// Where app data (config, default catalog, cache) lives — app-data normally,
     /// or a `fox-cull-data` folder next to the exe in portable mode.
     pub data_root: PathBuf,
-    /// Current catalog file path (relocatable onto the user's SSD).
+    /// Current catalog file path (lives inside the active drive's library dir).
     pub catalog_path: Mutex<PathBuf>,
+    /// The active library folder (`<drive>/_FoxCull`, or an app-data fallback for
+    /// a read-only mount). Holds the catalog, the `thumbs` cache and `recycle`.
+    pub lib_dir: Mutex<PathBuf>,
+    /// Active per-drive recycle folder (`<libDir>/recycle`) — where folder-mode
+    /// deletes land so the in-app Trash can list / restore / purge them.
+    pub recycle_dir: Mutex<PathBuf>,
     /// Path to the bundled ffmpeg (next to our exe), or None on a dev build
     /// without it — then video posters fall back to the film placeholder.
     pub ffmpeg: Option<PathBuf>,
@@ -75,6 +81,98 @@ pub fn cache_dir_for(catalog_path: &Path) -> PathBuf {
         .parent()
         .map(|d| d.join("thumbs"))
         .unwrap_or_else(|| PathBuf::from("thumbs"))
+}
+
+/// Bundled per-drive library folder name: `<drive>/_FoxCull` holds that drive's
+/// catalog, thumbnail cache and recycle bin, so everything for a drive travels
+/// with it.
+const LIB_DIRNAME: &str = "_FoxCull";
+
+struct Library {
+    dir: PathBuf,
+    catalog: PathBuf,
+    cache: PathBuf,
+    recycle: PathBuf,
+    on_drive: bool,
+}
+
+/// Can we create files directly in `dir`? Decides on-drive vs app-data fallback.
+fn is_writable(dir: &Path) -> bool {
+    let probe = dir.join(".foxcull_write_test.tmp");
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Filesystem-safe id for a drive root, for the app-data fallback dir name.
+fn drive_id(root: &Path) -> String {
+    let id: String = root
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let id = id.trim_matches('_').to_string();
+    if id.is_empty() {
+        "root".into()
+    } else {
+        id
+    }
+}
+
+/// Resolve the library for a drive: on the drive itself (`<drive>/_FoxCull`) when
+/// writable, else a per-drive folder under app-data (read-only mounts — e.g. NTFS
+/// on a Mac without Paragon — so rating/culling still works there).
+fn resolve_library(data_root: &Path, root: &Path) -> Library {
+    let (dir, on_drive) = if is_writable(root) {
+        (root.join(LIB_DIRNAME), true)
+    } else {
+        (data_root.join("libraries").join(drive_id(root)), false)
+    };
+    Library {
+        catalog: dir.join("catalog.sqlite"),
+        cache: dir.join("thumbs"),
+        recycle: dir.join("recycle"),
+        dir,
+        on_drive,
+    }
+}
+
+/// Seconds since the Unix epoch.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// If `path` is taken, append " (2)", " (3)", … before the extension — used so a
+/// recycle move or a restore never clobbers an existing file.
+fn uniquify(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = path.extension().map(|e| e.to_string_lossy().to_string());
+    let mut n = 2;
+    loop {
+        let name = match &ext {
+            Some(e) => format!("{stem} ({n}).{e}"),
+            None => format!("{stem} ({n})"),
+        };
+        let cand = parent.join(name);
+        if !cand.exists() {
+            return cand;
+        }
+        n += 1;
+    }
 }
 
 #[derive(Serialize)]
@@ -117,17 +215,107 @@ fn rel_of(root: &Option<PathBuf>, abs: &str) -> String {
     abs.replace('\\', "/")
 }
 
-/// Set the library root. Adds it (recursively) to the asset-protocol scope so
-/// originals under it can be served to the webview for the loupe / video player.
+#[derive(Serialize)]
+pub struct LibraryInfo {
+    /// The drive/volume root — the library root that catalog keys are relative to.
+    pub root: String,
+    /// The active library folder (`<drive>/_FoxCull` or app-data fallback).
+    pub dir: String,
+    pub catalog: String,
+    pub recycle: String,
+    /// True when the library lives on the drive itself; false = app-data fallback
+    /// (the drive root wasn't writable, e.g. a read-only mount or `C:\`).
+    pub on_drive: bool,
+    /// Whether the opened drive root is writable (proxy for "can delete here").
+    pub writable: bool,
+}
+
+/// Activate the library for the drive that `root` lives on, switching the catalog,
+/// thumbnail cache and recycle folder to that drive's bundled `_FoxCull` folder
+/// (auto per-drive). Idempotent — re-activating the same drive is a no-op. Adds
+/// the drive + cache + recycle to the asset-protocol scope so originals and
+/// cached previews can be served to the webview.
+///
+/// Migration is **data-loss-safe**: a fresh per-drive catalog is seeded by COPYING
+/// (never moving) the current catalog or adopting a legacy `<drive>/fox-cull.catalog`,
+/// and the legacy source is only removed AFTER the new catalog is open — so a
+/// disconnect mid-operation can never lose ratings.
 #[tauri::command]
-pub fn set_library_root(app: AppHandle, state: State<'_, AppState>, root: String) -> Result<(), String> {
+pub fn set_library_root(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    catalog: State<'_, Catalog>,
+    root: String,
+) -> Result<LibraryInfo, String> {
     let p = PathBuf::from(&root);
     if !p.is_dir() {
         return Err(format!("not a directory: {root}"));
     }
-    let _ = app.asset_protocol_scope().allow_directory(&p, true);
-    *state.root.lock() = Some(p);
-    Ok(())
+    let drive = drive_root(&root);
+    let lib = resolve_library(&state.data_root, &drive);
+
+    let current = state.catalog_path.lock().clone();
+    if current != lib.catalog {
+        std::fs::create_dir_all(&lib.dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&lib.recycle).ok();
+
+        // Seed/adopt a fresh per-drive catalog without ever destroying the source.
+        let mut legacy_to_remove: Option<PathBuf> = None;
+        if !lib.catalog.exists() {
+            let legacy = drive.join("fox-cull.catalog");
+            if lib.on_drive && legacy.is_file() {
+                catalog.checkpoint(); // fold WAL into the file before copying
+                if std::fs::copy(&legacy, &lib.catalog).is_ok() {
+                    legacy_to_remove = Some(legacy);
+                    // Adopt the legacy `<drive>/thumbs` cache too, if present.
+                    let legacy_thumbs = drive.join("thumbs");
+                    if legacy_thumbs.is_dir() && !lib.cache.exists() {
+                        let _ = std::fs::rename(&legacy_thumbs, &lib.cache);
+                    }
+                }
+            } else if current.is_file() {
+                catalog.checkpoint();
+                let _ = std::fs::copy(&current, &lib.catalog);
+            }
+        }
+        std::fs::create_dir_all(&lib.cache).ok();
+
+        catalog
+            .reopen(&lib.catalog)
+            .map_err(|e| format!("failed to open catalog: {e}"))?;
+        *state.catalog_path.lock() = lib.catalog.clone();
+        *state.cache_dir.lock() = lib.cache.clone();
+        *state.lib_dir.lock() = lib.dir.clone();
+        *state.recycle_dir.lock() = lib.recycle.clone();
+        let _ = app.asset_protocol_scope().allow_directory(&lib.cache, true);
+        let _ = app.asset_protocol_scope().allow_directory(&lib.recycle, true);
+
+        // The new catalog is open (old connection closed) → the legacy file is
+        // unlocked and safe to remove. Clear any stale config override too.
+        if let Some(legacy) = legacy_to_remove {
+            let ls = legacy.to_string_lossy().to_string();
+            let _ = std::fs::remove_file(&legacy);
+            let _ = std::fs::remove_file(format!("{ls}-wal"));
+            let _ = std::fs::remove_file(format!("{ls}-shm"));
+            let mut cfg = crate::config::load(&state.data_root);
+            if cfg.catalog_path.is_some() {
+                cfg.catalog_path = None;
+                crate::config::save(&state.data_root, &cfg);
+            }
+        }
+    }
+
+    *state.root.lock() = Some(drive.clone());
+    let _ = app.asset_protocol_scope().allow_directory(&drive, true);
+
+    Ok(LibraryInfo {
+        root: drive.to_string_lossy().to_string(),
+        dir: lib.dir.to_string_lossy().to_string(),
+        catalog: lib.catalog.to_string_lossy().to_string(),
+        recycle: lib.recycle.to_string_lossy().to_string(),
+        on_drive: lib.on_drive,
+        writable: is_writable(&drive),
+    })
 }
 
 /// Immediate subdirectories of `dir` (for the lazy folder tree). Dotfolders are
@@ -813,13 +1001,10 @@ fn cache_files_for(cache_dir: &Path, src: &str) -> Vec<PathBuf> {
     out
 }
 
-/// Name of the auto-created, per-drive reject folder (the "recycle bin alt").
-const REJECT_DIRNAME: &str = "_FoxCull Recycle Bin";
-
 /// Volume/drive root of an absolute path: `C:\` on Windows; `/Volumes/<name>`
-/// (or `/`) on macOS/Linux. Used to mirror the folder structure from the drive
-/// root into the reject folder, exactly as the user described
-/// (`C:\…\alpha\beta\gamma\x.jpg` → `C:\_FoxCull Recycle Bin\alpha\beta\gamma\x.jpg`).
+/// (or `/`) on macOS/Linux. Also the library root for catalog keys, and the base
+/// the recycle folder mirrors structure from
+/// (`C:\…\alpha\beta\x.jpg` → `<recycle>\alpha\beta\x.jpg`).
 fn drive_root(path: &str) -> PathBuf {
     #[cfg(windows)]
     {
@@ -851,66 +1036,73 @@ fn rel_from_drive(src: &str) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(Path::new(src).file_name().unwrap_or_default()))
 }
 
-/// Move one file into the reject folder, mirroring its path from the drive root
-/// so shots from different subfolders never collide. `dest` is the chosen reject
-/// folder, or `None` to auto-target `<driveRoot>/_FoxCull Recycle Bin` per file
-/// (handles selections spanning multiple drives). Fast rename first; copy+remove
-/// across volumes.
-fn move_into(dest: &Option<PathBuf>, src: &str) -> Result<(), String> {
-    let base = match dest {
-        Some(d) => d.clone(),
-        None => drive_root(src).join(REJECT_DIRNAME),
-    };
-    let target = base.join(rel_from_drive(src));
+/// Move one file into the per-drive recycle folder, mirroring its path from the
+/// drive root so shots from different subfolders never collide. Returns
+/// `(stored, orig)` — the path within the recycle dir, and the original
+/// drive-relative path (for Restore). Fast rename first; copy+remove across
+/// volumes. Never clobbers an existing file (uniquifies).
+fn move_into_recycle(recycle: &Path, src: &str) -> Result<(String, String), String> {
+    let rel = rel_from_drive(src);
+    let orig = rel.to_string_lossy().replace('\\', "/");
+    let target = uniquify(recycle.join(&rel));
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    if std::fs::rename(src, &target).is_ok() {
-        return Ok(());
+    if std::fs::rename(src, &target).is_err() {
+        std::fs::copy(src, &target).map_err(|e| e.to_string())?;
+        std::fs::remove_file(src).map_err(|e| e.to_string())?;
     }
-    std::fs::copy(src, &target).map_err(|e| e.to_string())?;
-    std::fs::remove_file(src).map_err(|e| e.to_string())?;
-    Ok(())
+    let stored = target
+        .strip_prefix(recycle)
+        .unwrap_or(&rel)
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok((stored, orig))
 }
 
-/// Dispose of rejected files. `mode` = "recycle" (OS Recycle Bin / Trash,
-/// recoverable) or "folder" (move into `dest`, preserving structure — handy for
-/// a reversible "review later" sweep). Drops catalog rows for moved files.
+/// Dispose of rejected files. `mode` = "recycle" (OS Recycle Bin / Trash) or
+/// "folder" (move into the active drive's `_FoxCull/recycle`, tracked by the
+/// in-app Trash so it can be previewed, restored or purged). Drops catalog
+/// decision rows for disposed files; records folder-mode deletes in `trash`.
 #[tauri::command]
 pub fn dispose_rejected(
     state: State<'_, AppState>,
     catalog: State<'_, Catalog>,
     paths: Vec<String>,
     mode: String,
-    dest: Option<String>,
 ) -> TrashOutcome {
     let root = state.root.lock().clone();
     let cache_dir = state.cache_dir.lock().clone();
-    // An explicit destination overrides; otherwise "folder" mode auto-targets a
-    // per-drive `_FoxCull Recycle Bin` (computed inside move_into).
-    let dest_path = dest
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
+    let recycle = state.recycle_dir.lock().clone();
+    let folder = mode == "folder";
+    let at = now();
     let mut deleted = 0usize;
     let mut failed = Vec::new();
     let mut errors = Vec::new();
     let mut forget = Vec::new();
+    let mut trash_rows: Vec<(String, String, String, i64)> = Vec::new();
     for p in &paths {
         // Compute the cache files NOW, while the original still exists (the keys
         // hash its metadata) — we remove them only after a successful dispose.
         let caches = cache_files_for(&cache_dir, p);
-        let result = if mode == "folder" {
-            move_into(&dest_path, p)
+        let result: Result<Option<(String, String)>, String> = if folder {
+            move_into_recycle(&recycle, p).map(Some)
         } else {
-            trash::delete(p).map_err(|e| e.to_string())
+            trash::delete(p).map(|_| None).map_err(|e| e.to_string())
         };
         match result {
-            Ok(()) => {
+            Ok(stored) => {
                 deleted += 1;
                 forget.push(rel_of(&root, p));
                 for c in caches {
                     let _ = std::fs::remove_file(c);
+                }
+                if let Some((stored, orig)) = stored {
+                    let name = Path::new(p)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    trash_rows.push((stored, orig, name, at));
                 }
             }
             Err(e) => {
@@ -920,6 +1112,9 @@ pub fn dispose_rejected(
         }
     }
     catalog.forget(&forget);
+    if !trash_rows.is_empty() {
+        let _ = catalog.add_trash_many(&trash_rows);
+    }
     TrashOutcome {
         deleted,
         failed,
@@ -927,88 +1122,151 @@ pub fn dispose_rejected(
     }
 }
 
+// ── in-app Trash (per-drive recycle folder) ─────────────────────────────────
+
 #[derive(Serialize)]
-pub struct CatalogInfo {
+pub struct TrashItem {
+    pub stored: String,
+    pub orig: String,
+    /// Absolute path of the file in the recycle dir (for the thumbnail/preview).
     pub path: String,
-    pub data_root: String,
-    pub is_default: bool,
+    pub name: String,
+    pub kind: String,
+    pub ext: String,
+    pub deleted_at: i64,
 }
 
-/// Where the catalog currently lives, and whether it's the default location.
+/// Everything in the active drive's Trash, most recently rejected first. Prunes
+/// rows whose file has vanished (e.g. emptied outside the app).
 #[tauri::command]
-pub fn catalog_info(state: State<'_, AppState>) -> CatalogInfo {
-    let path = state.catalog_path.lock().clone();
-    let default = state.data_root.join("catalog.sqlite");
-    CatalogInfo {
-        path: path.to_string_lossy().to_string(),
-        data_root: state.data_root.to_string_lossy().to_string(),
-        is_default: path == default,
+pub fn list_trash(state: State<'_, AppState>, catalog: State<'_, Catalog>) -> Vec<TrashItem> {
+    let recycle = state.recycle_dir.lock().clone();
+    let mut stale: Vec<String> = Vec::new();
+    let items: Vec<TrashItem> = catalog
+        .list_trash()
+        .into_iter()
+        .filter_map(|r| {
+            let path = recycle.join(&r.stored);
+            if !path.exists() {
+                stale.push(r.stored);
+                return None;
+            }
+            Some(TrashItem {
+                kind: media::classify(&path).as_str().to_string(),
+                ext: media::ext_lower(&path),
+                path: path.to_string_lossy().to_string(),
+                stored: r.stored,
+                orig: r.orig,
+                name: r.name,
+                deleted_at: r.deleted_at,
+            })
+        })
+        .collect();
+    if !stale.is_empty() {
+        catalog.remove_trash(&stale);
     }
+    items
 }
 
-/// Relocate the catalog into `dir` (e.g. onto the SSD beside the photos). If a
-/// `fox-cull.catalog` already exists there, adopt it; otherwise migrate the
-/// current one. Returns the new catalog path. Portable-friendly: one file the
-/// user can back up or carry between machines.
-/// Point the cache dir at `<catalogDir>/thumbs`, create it, and add it to the
-/// asset-protocol scope so the webview can load posters/thumbnails from there.
-fn relocate_cache(app: &AppHandle, state: &State<'_, AppState>, catalog_path: &Path) {
-    let cache = cache_dir_for(catalog_path);
-    let _ = std::fs::create_dir_all(&cache);
-    let _ = app.asset_protocol_scope().allow_directory(&cache, true);
-    *state.cache_dir.lock() = cache;
+#[derive(Serialize)]
+pub struct RestoreOutcome {
+    pub restored: usize,
+    pub failed: Vec<String>,
 }
 
+/// Move trashed files back to their original location on the drive. Uniquifies
+/// if something now occupies the original path. Removes restored trash rows.
 #[tauri::command]
-pub fn set_catalog_dir(
-    app: AppHandle,
+pub fn restore_trash(
     state: State<'_, AppState>,
     catalog: State<'_, Catalog>,
-    dir: String,
-) -> Result<String, String> {
-    let dir = PathBuf::from(&dir);
-    if !dir.is_dir() {
-        return Err(format!("not a directory: {}", dir.display()));
-    }
-    let new_path = dir.join("fox-cull.catalog");
-    let old_path = state.catalog_path.lock().clone();
-    if new_path != old_path {
-        if !new_path.exists() {
-            catalog.checkpoint(); // fold WAL into the main file before copying
-            std::fs::copy(&old_path, &new_path).map_err(|e| e.to_string())?;
+    stored: Vec<String>,
+) -> RestoreOutcome {
+    let recycle = state.recycle_dir.lock().clone();
+    let drive = match state.root.lock().clone() {
+        Some(r) => r,
+        None => {
+            return RestoreOutcome {
+                restored: 0,
+                failed: stored,
+            }
         }
-        catalog.reopen(&new_path).map_err(|e| e.to_string())?;
-        *state.catalog_path.lock() = new_path.clone();
-        relocate_cache(&app, &state, &new_path);
-        let mut cfg = crate::config::load(&state.data_root);
-        cfg.catalog_path = Some(new_path.to_string_lossy().to_string());
-        crate::config::save(&state.data_root, &cfg);
+    };
+    let orig_of: HashMap<String, String> = catalog
+        .list_trash()
+        .into_iter()
+        .map(|r| (r.stored, r.orig))
+        .collect();
+    let mut restored = 0usize;
+    let mut failed = Vec::new();
+    let mut done = Vec::new();
+    for s in &stored {
+        let from = recycle.join(s);
+        let orig = orig_of.get(s).cloned().unwrap_or_else(|| s.clone());
+        let to = uniquify(drive.join(&orig));
+        if let Some(parent) = to.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let ok = std::fs::rename(&from, &to).is_ok()
+            || (std::fs::copy(&from, &to).is_ok() && std::fs::remove_file(&from).is_ok());
+        if ok {
+            restored += 1;
+            done.push(s.clone());
+        } else {
+            failed.push(s.clone());
+        }
     }
-    Ok(new_path.to_string_lossy().to_string())
+    catalog.remove_trash(&done);
+    RestoreOutcome { restored, failed }
 }
 
-/// Move the catalog back to the default app-data location.
+/// Permanently delete trashed files (and their cached thumbs/posters). Returns
+/// the number removed.
 #[tauri::command]
-pub fn reset_catalog_dir(
-    app: AppHandle,
+pub fn purge_trash(
     state: State<'_, AppState>,
     catalog: State<'_, Catalog>,
-) -> Result<String, String> {
-    let def = state.data_root.join("catalog.sqlite");
-    let old_path = state.catalog_path.lock().clone();
-    if def != old_path {
-        if !def.exists() {
-            catalog.checkpoint();
-            std::fs::copy(&old_path, &def).map_err(|e| e.to_string())?;
+    stored: Vec<String>,
+) -> usize {
+    let recycle = state.recycle_dir.lock().clone();
+    let cache_dir = state.cache_dir.lock().clone();
+    let mut n = 0usize;
+    let mut done = Vec::new();
+    for s in &stored {
+        let p = recycle.join(s);
+        let caches = cache_files_for(&cache_dir, &p.to_string_lossy());
+        if std::fs::remove_file(&p).is_ok() || !p.exists() {
+            n += 1;
+            done.push(s.clone());
+            for c in caches {
+                let _ = std::fs::remove_file(c);
+            }
         }
-        catalog.reopen(&def).map_err(|e| e.to_string())?;
-        *state.catalog_path.lock() = def.clone();
-        relocate_cache(&app, &state, &def);
-        let mut cfg = crate::config::load(&state.data_root);
-        cfg.catalog_path = None;
-        crate::config::save(&state.data_root, &cfg);
     }
-    Ok(def.to_string_lossy().to_string())
+    catalog.remove_trash(&done);
+    n
+}
+
+/// Where the active library lives (catalog + cache + recycle), and whether it's
+/// on the drive or an app-data fallback.
+#[tauri::command]
+pub fn library_info(state: State<'_, AppState>) -> LibraryInfo {
+    let dir = state.lib_dir.lock().clone();
+    let catalog = state.catalog_path.lock().clone();
+    let recycle = state.recycle_dir.lock().clone();
+    let root = state.root.lock().clone();
+    let writable = root.as_ref().map(|r| is_writable(r)).unwrap_or(false);
+    let on_drive = !dir.starts_with(&state.data_root);
+    LibraryInfo {
+        root: root
+            .map(|r| r.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        dir: dir.to_string_lossy().to_string(),
+        catalog: catalog.to_string_lossy().to_string(),
+        recycle: recycle.to_string_lossy().to_string(),
+        on_drive,
+        writable,
+    }
 }
 
 /// Reveal a file in the OS file manager (Explorer / Finder), selected.
