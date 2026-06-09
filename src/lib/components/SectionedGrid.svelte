@@ -90,14 +90,19 @@
     return () => ro.disconnect();
   });
 
-  /** Bring a global item index into view (used by keyboard navigation). */
-  export function scrollToIndex(i: number) {
+  /** Bring a global item index into view (used by keyboard navigation). With
+   *  `center`, place it mid-viewport (restores position on return from Focus). */
+  export function scrollToIndex(i: number, center = false) {
     const el = viewport;
     if (!el) return;
     const r = rows.find(
       (rw) => rw.type === "cells" && rw.idxs.length > 0 && i >= rw.idxs[0] && i <= rw.idxs[rw.idxs.length - 1],
     );
     if (!r) return;
+    if (center) {
+      el.scrollTop = Math.max(0, r.y - (vpHeight - rowH) / 2);
+      return;
+    }
     // Reveal the month header too when scrolling up to a section's first row.
     if (r.y - headerH < el.scrollTop) el.scrollTop = Math.max(0, r.y - headerH);
     else if (r.y + rowH > el.scrollTop + vpHeight) el.scrollTop = r.y + rowH - vpHeight;

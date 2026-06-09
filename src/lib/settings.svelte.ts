@@ -8,7 +8,7 @@ export type ViewMode = "grid" | "details" | "loupe";
 export type FilmstripPos = "bottom" | "right" | "hidden";
 export type SortBy = "name" | "date" | "capture" | "type" | "size";
 export type SortDir = "asc" | "desc";
-export type GroupBy = "none" | "month" | "week";
+export type GroupBy = "none" | "folder" | "type" | "year" | "month" | "week";
 export type TypeFilter = "all" | "image" | "video" | "raw";
 export type DeleteMode = "recycle" | "folder";
 

@@ -61,7 +61,7 @@
   let libInfo = $state<LibraryInfo | null>(null);
   let trashOpen = $state(false);
   let trashItems = $state<TrashItem[]>([]);
-  let gridComp = $state<{ scrollToIndex: (i: number) => void } | null>(null);
+  let gridComp = $state<{ scrollToIndex: (i: number, center?: boolean) => void } | null>(null);
   let loupeComp = $state<{ togglePlay: () => void; seekBy: (d: number) => void } | null>(null);
 
   const HOLD_MS = 850;
@@ -81,18 +81,41 @@
   // file's EXIF/creation_time is known.
   let captureMap = $state<Record<string, number>>({});
   const captureOf = (it: MediaItem) => captureMap[it.path] ?? it.mtime;
-  // Section helpers for the grouped grid (UTC, to match how dates are stored).
-  // Week = calendar week-of-month (days 1–7 = Week 1, 8–14 = Week 2, …).
-  function sectionKey(secs: number): string {
-    const d = new Date(secs * 1000);
+
+  // Grouping that needs real capture dates (the date-based sections); folder/type
+  // group on the path/kind we already have, so they cost nothing extra.
+  const DATE_GROUPS = new Set(["year", "month", "week"]);
+  const TYPE_ORDER: Record<string, number> = { image: 0, raw: 1, video: 2, other: 3 };
+  const TYPE_LABEL: Record<string, string> = {
+    image: "Photos",
+    raw: "RAW",
+    video: "Video",
+    other: "Other",
+  };
+  const parentOf = (p: string) => p.replace(/[\\/][^\\/]*$/, "");
+  const parentName = (p: string) => parentOf(p).split(/[\\/]/).filter(Boolean).pop() ?? "/";
+
+  // Section helpers for the grouped grid (folder · type · year · month · week).
+  // Dates are UTC to match how capture timestamps are stored. Week = calendar
+  // week-of-month (days 1–7 = Week 1, 8–14 = Week 2, …).
+  function sectionKey(it: MediaItem): string {
+    const g = settings.s.groupBy;
+    if (g === "folder") return parentOf(it.path);
+    if (g === "type") return it.kind;
+    const d = new Date(captureOf(it) * 1000);
+    if (g === "year") return `${d.getUTCFullYear()}`;
     const base = `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
-    if (settings.s.groupBy === "week") return `${base}-${Math.floor((d.getUTCDate() - 1) / 7)}`;
-    return base;
+    if (g === "week") return `${base}-${Math.floor((d.getUTCDate() - 1) / 7)}`;
+    return base; // month
   }
-  function sectionLabel(secs: number): string {
-    const d = new Date(secs * 1000);
+  function sectionLabel(it: MediaItem): string {
+    const g = settings.s.groupBy;
+    if (g === "folder") return parentName(it.path);
+    if (g === "type") return TYPE_LABEL[it.kind] ?? it.kind;
+    const d = new Date(captureOf(it) * 1000);
+    if (g === "year") return `${d.getUTCFullYear()}`;
     const mon = d.toLocaleString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
-    if (settings.s.groupBy === "week") return `${mon} · Week ${Math.floor((d.getUTCDate() - 1) / 7) + 1}`;
+    if (g === "week") return `${mon} · Week ${Math.floor((d.getUTCDate() - 1) / 7) + 1}`;
     return mon;
   }
 
@@ -109,9 +132,20 @@
     else if (flagFilter === "pick") arr = arr.filter((i) => i.flag === "pick");
     else if (flagFilter === "unflagged") arr = arr.filter((i) => !i.flag);
 
+    const g = settings.s.groupBy;
     const dir = settings.s.sortDir === "asc" ? 1 : -1;
-    const by = settings.s.groupBy !== "none" ? "capture" : settings.s.sortBy;
+    // Date groupings imply a capture-date order (that's the order their sections
+    // need); folder/type keep their groups contiguous via a direction-independent
+    // primary key, then order within each group by the chosen sort.
+    const by = DATE_GROUPS.has(g) ? "capture" : settings.s.sortBy;
     return [...arr].sort((a, b) => {
+      if (g === "folder") {
+        const p = collator.compare(parentOf(a.path), parentOf(b.path));
+        if (p !== 0) return p;
+      } else if (g === "type") {
+        const p = (TYPE_ORDER[a.kind] ?? 9) - (TYPE_ORDER[b.kind] ?? 9);
+        if (p !== 0) return p;
+      }
       let c = 0;
       if (by === "capture") c = captureOf(a) - captureOf(b);
       else if (by === "date") c = a.mtime - b.mtime;
@@ -128,9 +162,9 @@
     const out: { label: string; count: number }[] = [];
     let key = "";
     for (const it of view) {
-      const k = sectionKey(captureOf(it));
+      const k = sectionKey(it);
       if (k !== key) {
-        out.push({ label: sectionLabel(captureOf(it)), count: 0 });
+        out.push({ label: sectionLabel(it), count: 0 });
         key = k;
       }
       out[out.length - 1].count++;
@@ -228,7 +262,7 @@
   }
 
   /** Whether the current view depends on real capture dates. */
-  let needCaptures = $derived(settings.s.groupBy !== "none" || settings.s.sortBy === "capture");
+  let needCaptures = $derived(DATE_GROUPS.has(settings.s.groupBy) || settings.s.sortBy === "capture");
 
   let capturesDir: string | null = null;
   async function fetchCaptures(dir: string, paths: string[]) {
@@ -329,19 +363,52 @@
     prefetchAroundActive();
   });
 
+  // Restore grid position when returning from Focus: bring the shot you were
+  // looking at back into the middle of the grid, instead of snapping to the top
+  // (which happened because the grid component remounts at scroll 0).
+  let prevViewMode: ViewMode = "grid";
+  $effect(() => {
+    const vm = viewMode;
+    if (vm !== "loupe" && prevViewMode === "loupe") {
+      const i = activeIndex;
+      requestAnimationFrame(() => gridComp?.scrollToIndex(i, true));
+    }
+    prevViewMode = vm;
+  });
+
   // ── Prepare folder: pre-cache full previews for the whole folder up front ──
   // The grid warmer only makes small thumbnails; this generates every shot's big
   // Focus preview (and video posters) so a culling pass through the folder has
   // zero blur. Runs on the backend's bounded pool; safe to keep working meanwhile.
   let preparing = $state(false);
   let prepared = $state(false);
+  let prepDone = $state(0);
+  let prepTotal = $state(0);
+  let prepEta = $state("");
+  let prepPct = $derived(prepTotal ? Math.round((prepDone / prepTotal) * 100) : 0);
   async function prepareFolder() {
     if (!currentDir || preparing || !view.length) return;
     preparing = true;
     prepared = false;
     const dir = currentDir;
+    // Focus previews are the big (1920px) renders; the small grid thumbs are
+    // already warmed on folder-open. We chunk the work so the button can show
+    // real progress + a time estimate instead of an opaque spinner.
+    const paths = view.filter((i) => i.kind !== "other").map((i) => i.path);
+    prepTotal = paths.length;
+    prepDone = 0;
+    prepEta = "";
+    const t0 = performance.now();
+    const CHUNK = 16;
     try {
-      await api.warmThumbnails(view.map((i) => i.path), LOUPE_MAX);
+      for (let i = 0; i < paths.length; i += CHUNK) {
+        if (currentDir !== dir) break; // folder switched — abandon
+        await api.warmThumbnails(paths.slice(i, i + CHUNK), LOUPE_MAX);
+        prepDone = Math.min(paths.length, i + CHUNK);
+        const elapsed = performance.now() - t0;
+        const remain = (elapsed / prepDone) * (paths.length - prepDone);
+        prepEta = remain > 1500 ? `~${Math.ceil(remain / 1000)}s` : "almost done";
+      }
     } finally {
       preparing = false;
       // Only flash "ready" if we're still on the same folder we prepared.
@@ -620,9 +687,21 @@
     if (k === "p") { flag("pick"); return; }
     if (k === "u") { unset(); return; }
   }
+
+  // Mouse back/forward buttons → a simple Focus⇄grid toggle (no history stack):
+  // Forward (button 4) on a selected shot opens Focus; Back (button 3) from Focus
+  // returns to the grid (which scroll-restores to that shot). preventDefault stops
+  // the webview trying to navigate its history and blanking the single-page app.
+  function onmouseup(e: MouseEvent) {
+    if (e.button === 3) {
+      if (viewMode === "loupe") { setView("grid"); e.preventDefault(); }
+    } else if (e.button === 4) {
+      if (viewMode !== "loupe" && active) { setView("loupe"); e.preventDefault(); }
+    }
+  }
 </script>
 
-<svelte:window {onkeydown} oncontextmenu={onGlobalContextMenu} />
+<svelte:window {onkeydown} {onmouseup} oncontextmenu={onGlobalContextMenu} />
 
 {#snippet gridCell(item: MediaItem, i: number)}
   <button
@@ -712,8 +791,11 @@
         <button class="ico" title="Sort direction" onclick={() => settings.set({ sortDir: settings.s.sortDir === "asc" ? "desc" : "asc" })}>
           {settings.s.sortDir === "asc" ? "↑" : "↓"}
         </button>
-        <select class="sel" title="Section the grid by capture date" bind:value={settings.s.groupBy} onchange={() => { settings.set({ groupBy: settings.s.groupBy }); maybeFetchCaptures(); }}>
+        <select class="sel" title="Split the grid into sections" bind:value={settings.s.groupBy} onchange={() => { settings.set({ groupBy: settings.s.groupBy }); maybeFetchCaptures(); }}>
           <option value="none">No groups</option>
+          <option value="folder">Group: folder</option>
+          <option value="type">Group: type</option>
+          <option value="year">Group: year</option>
           <option value="month">Group: month</option>
           <option value="week">Group: week</option>
         </select>
@@ -795,13 +877,16 @@
 
       <!-- actions (top-right) -->
       <button
-        class="btn sm"
+        class="btn sm prep"
         class:on={preparing || prepared}
         onclick={prepareFolder}
         disabled={!view.length || preparing}
-        title="Pre-load full-size previews for this whole folder, so Focus view has no loading blur"
+        title="Pre-render full-size Focus previews for this whole folder, so flipping through it in Focus view has zero loading blur. (Grid thumbnails are already pre-cached when a folder opens.)"
       >
-        {#if preparing}⏳ Preparing…{:else if prepared}✓ Ready{:else}⚡ Prepare{/if}
+        {#if preparing}<span class="prep-fill" style="width:{prepPct}%"></span>{/if}
+        <span class="prep-lbl">
+          {#if preparing}⏳ {prepPct}%{prepEta ? ` · ${prepEta}` : ""}{:else if prepared}✓ Ready{:else}⚡ Prepare{/if}
+        </span>
       </button>
       <button class="btn sm" onclick={selectAllFiltered} disabled={!view.length} title="Select all in view">Select all{view.length ? ` (${view.length})` : ""}</button>
       <button class="btn sm danger" onclick={rejectSelected} disabled={selected.size === 0} title="Flag the selection as reject">
@@ -1020,6 +1105,9 @@
   .zoom input { width: 90px; accent-color: var(--accent); }
   .btn.sm { padding: 5px 10px; border-radius: 7px; font-size: 12.5px; }
   .btn.sm.on { border-color: var(--accent); color: var(--accent); }
+  .prep { position: relative; overflow: hidden; min-width: 96px; text-align: center; }
+  .prep-fill { position: absolute; left: 0; top: 0; bottom: 0; background: color-mix(in srgb, var(--accent) 30%, transparent); transition: width 0.2s ease; }
+  .prep-lbl { position: relative; z-index: 1; white-space: nowrap; }
 
   .div { flex: 0 0 auto; align-self: stretch; width: 1px; margin: 2px 4px; background: var(--border); }
   .filterwrap { position: relative; }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { loadThumb, loadVideoPoster } from "$lib/thumbnail-loader";
+  import { loadThumb, loadVideoPoster, cancelThumb, cancelVideoPoster } from "$lib/thumbnail-loader";
   import type { MediaItem } from "$lib/types";
 
   let { item, size = 320 }: { item: MediaItem; size?: number } = $props();
@@ -27,6 +27,10 @@
     });
     return () => {
       alive = false;
+      // Scrolled out of view before the decode started — drop the queued request
+      // so on-screen cells aren't stuck behind work nobody's looking at anymore.
+      if (it.kind === "video") cancelVideoPoster(it.path);
+      else if (it.kind !== "other") cancelThumb(it.path, size);
     };
   });
 </script>

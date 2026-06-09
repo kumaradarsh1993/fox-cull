@@ -60,12 +60,17 @@
     return () => ro.disconnect();
   });
 
-  /** Keep a given index visible — used by keyboard navigation. */
-  export function scrollToIndex(i: number) {
+  /** Keep a given index visible — used by keyboard navigation. With `center`,
+   *  place it mid-viewport (used to restore position when returning from Focus). */
+  export function scrollToIndex(i: number, center = false) {
     const el = viewport;
     if (!el || cols <= 0) return;
     const row = Math.floor(i / cols);
     const y = row * rowH;
+    if (center) {
+      el.scrollTop = Math.max(0, y - (vpHeight - cellW) / 2);
+      return;
+    }
     if (y < el.scrollTop) el.scrollTop = y;
     else if (y + cellW > el.scrollTop + vpHeight) el.scrollTop = y + cellW - vpHeight;
   }
