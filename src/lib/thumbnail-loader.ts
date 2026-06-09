@@ -1,58 +1,53 @@
-// Viewport-prioritized, cancellable thumbnail loader.
+// Viewport-prioritized, cancellable, MEMORY-DISCIPLINED thumbnail loader.
 //
-// The grid's "not responding" freeze came from two things this module now fixes:
+// Design notes (after auditing the "progressively worse / not responding" bug):
 //
-//  1. The old queue was FIFO with no cancellation. A fast scroll enqueued every
-//     thumbnail you flew past; the cells now ON SCREEN waited behind that whole
-//     backlog, so the grid looked frozen. We now serve the MOST RECENTLY asked
-//     (i.e. the current viewport) FIRST (LIFO), and a cell that scrolls away
-//     before its decode starts CANCELS its request — so work tracks the viewport.
+// The freeze was NOT decode speed — folder scans are 0-3 ms and thumbnail files
+// are generated once and disk-cached. It was MEMORY: an earlier version held a
+// large LRU of decoded <img> bitmaps "warm" (up to 700 grid thumbs + a dozen
+// 1920px previews ≈ 350 MB). Scrolling a big folder accumulated that fast and the
+// WebView process ballooned until it thrashed. Holding decoded bitmaps in JS
+// fights the browser's own image-cache eviction — exactly the wrong move for a
+// virtualized grid of hundreds of images.
 //
-//  2. Nothing kept decoded bitmaps warm, so every scroll-back re-fired an
-//     asset-protocol IPC fetch + re-decode. A burst of `http://asset.localhost`
-//     requests is exactly what janks the WebView2 UI thread. We now RETAIN a
-//     large LRU of decoded <img> elements (the RAM the user explicitly offered),
-//     so revisiting recent cells is an in-memory cache hit — zero IPC, no decode.
-//
-//  - caps concurrent decodes (never floods Rust with hundreds of 12MP decodes)
-//  - memoizes resolved URLs (scroll-back is instant, zero IPC)
-//  - DE-DUPLICATES in-flight requests so the grid + filmstrip share ONE decode
-//  - generation token abandons queued work for the old folder on a switch
+// The disciplined approach:
+//  - hold (almost) NO decoded grid bitmaps. Virtualization keeps only the visible
+//    ~2 screens of <img> alive; the browser decodes/evicts them as it sees fit.
+//    Scroll-back is still fast because the asset URL stays in the WebView's own
+//    resource cache (a memory-cache hit, no IPC, quick re-decode of a small thumb).
+//  - memoize resolved URLs (bounded LRU) so we never re-invoke Rust for a thumb we
+//    already resolved, but DON'T pin its pixels.
+//  - cap concurrent decodes; serve the CURRENT viewport first (LIFO); a cell that
+//    scrolls away before its decode starts CANCELS its request.
+//  - keep ONLY a tiny bounded set of decoded Focus previews warm (those are big,
+//    1920px, and re-decoding them IS visible as a blur — the grid is not).
+//  - generation token abandons queued work for the old folder on a switch.
 
 import { api } from "./api";
 
-// 8 parallel decodes keeps all cores busy without thrashing the USB SSD's queue.
-const MAX_INFLIGHT = 8;
-// How many decoded thumbnails to keep warm in RAM. ~700 × ~0.3 MB ≈ 200 MB — well
-// within the budget, and enough to cover scrolling a few screens back instantly.
-const RETAIN = 700;
+const MAX_INFLIGHT = 6; // parallel decodes — enough to fill a viewport, gentle on the USB SSD
+const MEMO_CAP = 4000; // bound the URL cache so a long session can't grow it unbounded
 
-const memo = new Map<string, string>(); // key -> asset url (persists across folders)
+const memo = new Map<string, string>(); // key -> asset url (LRU, bounded)
 const pending = new Map<string, Promise<string | null>>(); // key -> in-flight promise
 type QItem = { key: string; run: () => void };
 let queue: QItem[] = []; // served LIFO (newest request = current viewport first)
 let inflight = 0;
 let generation = 0;
 
-// Decoded-image retention: holding a reference to an <img> keeps the webview's
-// resource for that URL in memory, so a sibling <img> with the same src paints
-// from cache without another asset-protocol round-trip. LRU-evicted by URL.
-const decoded = new Map<string, HTMLImageElement>();
-function retain(url: string) {
-  const have = decoded.get(url);
-  if (have) {
-    decoded.delete(url);
-    decoded.set(url, have); // mark most-recently-used
-    return;
+function memoGet(key: string): string | undefined {
+  const v = memo.get(key);
+  if (v !== undefined) {
+    memo.delete(key);
+    memo.set(key, v); // refresh recency
   }
-  const img = new Image();
-  img.decoding = "async";
-  img.src = url;
-  img.decode?.().catch(() => {});
-  decoded.set(url, img);
-  while (decoded.size > RETAIN) {
-    const oldest = decoded.keys().next().value as string;
-    decoded.delete(oldest);
+  return v;
+}
+function memoSet(key: string, url: string) {
+  memo.set(key, url);
+  if (memo.size > MEMO_CAP) {
+    const oldest = memo.keys().next().value as string;
+    memo.delete(oldest);
   }
 }
 
@@ -67,9 +62,7 @@ export function resetThumbs() {
   generation++;
   queue = [];
   pending.clear();
-  // Drop the warm decoded windows too — their images belong to the folder we're
-  // leaving; releasing the references lets the webview reclaim that RAM.
-  decoded.clear();
+  // Release the warm Focus previews from the folder we're leaving.
   loupeDecoded.clear();
   loupeInflight.clear();
 }
@@ -86,16 +79,24 @@ function cancel(key: string) {
   }
 }
 
-// ── loupe (Focus-view) preview prefetch ────────────────────────────────────
+/** Lightweight stats for the diagnostic memory log. */
+export function loaderStats() {
+  return {
+    memo: memo.size,
+    loupe: loupeDecoded.size,
+    pending: pending.size,
+    queue: queue.length,
+    inflight,
+  };
+}
+
+// ── loupe (Focus-view) preview prefetch — the ONLY place we pin bitmaps ──────
 //
-// The blur in Focus view is the time to (a) generate the large 1920px preview
-// (the grid warmer only makes 320px thumbs) and (b) have the webview decode it.
-// We fix both by pre-generating AND pre-decoding the previews for the photos
-// just ahead/behind the one you're on, then HOLDING a reference to each decoded
-// <img> so the webview doesn't evict the bitmap — that's what made going back a
-// few shots re-blur. When Focus later sets the same asset URL, the decode is
-// already warm and it appears instantly.
-const LOUPE_RETAIN = 14; // ~a dozen 1920px previews kept warm (encoded bytes are small)
+// Focus previews are large (1920px ≈ 11 MB decoded each) and re-decoding one IS
+// visible as a blur, so we keep a SMALL bounded set warm: the shots just
+// ahead/behind the one you're on. Kept tiny (6) so the held memory is bounded
+// (~66 MB max) and released entirely on a folder switch.
+const LOUPE_RETAIN = 6;
 const loupeDecoded = new Map<string, HTMLImageElement>(); // path -> decoded image (LRU)
 const loupeInflight = new Set<string>(); // paths currently being prefetched
 
@@ -104,21 +105,18 @@ const loupeInflight = new Set<string>(); // paths currently being prefetched
 export function prefetchLoupe(path: string): void {
   const have = loupeDecoded.get(path);
   if (have) {
-    // Mark most-recently-used so a backtrack keeps it alive.
     loupeDecoded.delete(path);
-    loupeDecoded.set(path, have);
+    loupeDecoded.set(path, have); // mark most-recently-used
     return;
   }
   if (loupeInflight.has(path)) return;
   loupeInflight.add(path);
-  // loupe_src goes through the shared cap/dedup queue (separate key from grid).
   enqueue(`loupe:${path}`, () => api.loupeSrc(path))
     .then((url) => {
       if (!url) return;
       const img = new Image();
       img.decoding = "async";
       img.src = url;
-      // decode() forces the bitmap to be ready now, not on first paint.
       img.decode?.().catch(() => {});
       loupeDecoded.set(path, img);
       while (loupeDecoded.size > LOUPE_RETAIN) {
@@ -132,11 +130,8 @@ export function prefetchLoupe(path: string): void {
 /** Shared queue/dedup/cap machinery. `fetchFsPath` resolves to a filesystem path
  *  the backend produced; we convert it to an asset URL and memoize it. */
 function enqueue(key: string, fetchFsPath: () => Promise<string>): Promise<string | null> {
-  const cached = memo.get(key);
-  if (cached) {
-    retain(cached); // keep recently-shown thumbs warm even on a pure cache hit
-    return Promise.resolve(cached);
-  }
+  const cached = memoGet(key);
+  if (cached) return Promise.resolve(cached);
 
   const existing = pending.get(key);
   if (existing) {
@@ -162,13 +157,8 @@ function enqueue(key: string, fetchFsPath: () => Promise<string>): Promise<strin
       fetchFsPath()
         .then((fsPath) => {
           const url = api.fileSrc(fsPath);
-          memo.set(key, url);
-          if (myGen === generation) {
-            retain(url);
-            resolve(url);
-          } else {
-            resolve(null);
-          }
+          memoSet(key, url);
+          resolve(myGen === generation ? url : null);
         })
         .catch(() => resolve(null))
         .finally(() => {

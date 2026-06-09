@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { api } from "$lib/api";
   import { settings } from "$lib/settings.svelte";
-  import { resetThumbs, prefetchLoupe } from "$lib/thumbnail-loader";
+  import { resetThumbs, prefetchLoupe, loaderStats } from "$lib/thumbnail-loader";
   import {
     LABELS,
     LABEL_BY_DIGIT,
@@ -25,8 +25,19 @@
   type FlagFilter = "all" | "pick" | "reject" | "unflagged";
   type ViewMode = "grid" | "details" | "loupe";
 
-  // Long edge we cache grid thumbnails at (matches <Thumb size>); used to warm.
-  const THUMB_MAX = 320;
+  // Decode thumbnails at (roughly) the size they're DISPLAYED at, not a fixed
+  // 320px. At the smallest grid a 320px thumb is ~6× the pixels actually shown —
+  // wasted decode + memory. Snapping the request to a few tiers (so dragging the
+  // zoom slider doesn't spawn dozens of cache variants) keeps the cached files,
+  // the decoded bitmaps and the transfer all proportional to what's on screen.
+  // Capped at 2 so a HiDPI panel doesn't quadruple memory.
+  const DPR = typeof window !== "undefined" ? Math.min(window.devicePixelRatio || 1, 2) : 1;
+  function tierFor(cssPx: number): number {
+    const t = cssPx * DPR;
+    if (t <= 200) return 192;
+    if (t <= 340) return 320;
+    return 480;
+  }
   // Long edge of the full Focus preview (matches the backend LOUPE_MAX). Used by
   // "Prepare folder" to pre-generate every shot's big preview, not just the thumb.
   const LOUPE_MAX = 1920;
@@ -179,6 +190,9 @@
   let rejectedCount = $derived(items.filter((i) => i.flag === "reject").length);
   let pickCount = $derived(items.filter((i) => i.flag === "pick").length);
   let stripCell = $derived(Math.max(64, settings.s.filmstripSize - 24));
+  // Thumbnail decode sizes, matched to how big the cells are actually drawn.
+  let gridThumbTier = $derived(tierFor(settings.s.gridSize));
+  let stripThumbTier = $derived(tierFor(stripCell));
 
   $effect(() => {
     if (activeIndex > view.length - 1) activeIndex = Math.max(0, view.length - 1);
@@ -201,6 +215,16 @@
       openFolder(settings.s.lastDir, { selectPath: settings.s.lastActivePath });
   });
 
+  // Heartbeat: log heap + loader caches every 20s so the logfile shows whether
+  // memory climbs while scrolling a folder (not just across switches). In an
+  // $effect (not the async onMount) so the interval is cleaned up correctly.
+  $effect(() => {
+    const beat = setInterval(() => {
+      if (currentDir) logMem(`tick ${basename(currentDir)}`);
+    }, 20000);
+    return () => clearInterval(beat);
+  });
+
   function rootForDir(dir: string): string {
     const d = drives.find((dr) => dir.toLowerCase().startsWith(dr.path.toLowerCase()));
     if (d) return d.path;
@@ -213,6 +237,27 @@
       allTags = await api.listTags();
     } catch {
       allTags = [];
+    }
+  }
+
+  // Diagnostic memory probe → the on-disk logfile (UI MEM …). Lets us confirm the
+  // JS heap + loader caches stay FLAT across folder switches instead of climbing
+  // (the signature of the old "progressively worse" leak). `performance.memory`
+  // is the renderer JS heap; watch msedgewebview2.exe in Task Manager for the
+  // decoded-image memory, which Chromium manages off-heap.
+  function logMem(tag: string) {
+    try {
+      const mem = (performance as unknown as { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } })
+        .memory;
+      const s = loaderStats();
+      const heap = mem
+        ? `heapMB=${Math.round(mem.usedJSHeapSize / 1048576)}/${Math.round(mem.jsHeapSizeLimit / 1048576)}`
+        : "heap=n/a";
+      api.logEvent(
+        `MEM ${tag} ${heap} memo=${s.memo} loupe=${s.loupe} pending=${s.pending} queue=${s.queue} inflight=${s.inflight}`,
+      );
+    } catch {
+      /* diagnostics only — never throw */
     }
   }
 
@@ -269,9 +314,11 @@
     // disk first, then the warmer trickles the rest in. Guard against a folder
     // switch landing during the delay.
     const order = view.map((i) => i.path);
+    const tier = gridThumbTier;
     setTimeout(() => {
-      if (currentDir === dir) api.warmThumbnails(order, THUMB_MAX);
+      if (currentDir === dir) api.warmThumbnails(order, tier);
     }, 500);
+    logMem(`open ${basename(dir)} n=${items.length}`);
     refreshTags();
     // Index real capture dates in the background — only when a date-driven view
     // needs them (sort-by-capture or month grouping). Cached after the first pass.
@@ -730,7 +777,7 @@
     ondblclick={() => { setActiveTo(i); setView("loupe"); }}
     oncontextmenu={(e) => openContextMenu(e, item, i)}
   >
-    <Thumb {item} size={320} />
+    <Thumb {item} size={gridThumbTier} />
     <span class="ov">
       {#if item.label}<span class="lbl-dot" style="background:var({LABEL_VAR[item.label]})"></span>{/if}
       {#if item.flag === "reject"}<span class="fl x">✕</span>{/if}
@@ -751,7 +798,7 @@
     oncontextmenu={(e) => openContextMenu(e, item, i)}
     title={item.name}
   >
-    <Thumb {item} size={320} />
+    <Thumb {item} size={stripThumbTier} />
     {#if item.label}<span class="s-lbl" style="background:var({LABEL_VAR[item.label]})"></span>{/if}
     {#if item.rating > 0}<span class="s-stars">{"★".repeat(item.rating)}</span>{/if}
     {#if item.flag === "reject"}<span class="s-x">✕</span>{/if}
