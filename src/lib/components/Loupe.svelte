@@ -5,11 +5,19 @@
 
   let { item }: { item: MediaItem | null } = $props();
 
-  let src = $state<string | null>(null); // sharp preview (image/raw) or video src
-  let lowSrc = $state<string | null>(null); // cached grid thumb shown instantly
-  let hiLoaded = $state(false); // sharp image finished decoding → cross-fade in
+  // Image transitions: the PREVIOUS photo stays painted until the next sharp
+  // preview is fully decoded, then we swap in one frame — no black gap, and no
+  // blur flash when flipping through an already-prepared folder. The blur-up
+  // placeholder only appears when a load is genuinely slow (cold cache / heavy
+  // file), where it's useful feedback instead of an artifact.
+  let curSrc = $state<string | null>(null); // sharp image currently painted
+  let lowSrc = $state<string | null>(null); // blurred placeholder (slow loads only)
+  let showLow = $state(false);
+  let vsrc = $state<string | null>(null); // video src (originals play directly)
   let failed = $state(false);
   let videoErr = $state(false);
+  let epoch = 0; // bumps on every item change; stale async work checks it
+  const SLOW_MS = 180; // how long a sharp load may take before we blur-up
 
   // ── video trim state ──
   let vid = $state<HTMLVideoElement | null>(null);
@@ -34,9 +42,7 @@
 
   $effect(() => {
     const it = item;
-    src = null;
-    lowSrc = null;
-    hiLoaded = false;
+    const my = ++epoch;
     failed = false;
     videoErr = false;
     paused = false;
@@ -48,15 +54,18 @@
     strip = null;
     preview = null;
     scrubbing = false;
-    if (!it) return;
-    if (it.kind === "image" || it.kind === "raw") {
-      loadThumb(it.path, 320).then((s) => {
-        if (item === it && s && !src) lowSrc = s;
-      });
+    showLow = false;
+    lowSrc = null;
+    if (!it) {
+      curSrc = null;
+      vsrc = null;
+      return;
     }
     if (it.kind === "video") {
+      curSrc = null;
+      vsrc = null;
       api.getTrim(it.path).then((t) => {
-        if (item === it && t) {
+        if (my === epoch && t) {
           inS = t[0];
           outS = t[1];
         }
@@ -66,18 +75,67 @@
       api
         .videoFilmstrip(it.path)
         .then((f) => {
-          if (item === it) strip = f;
+          if (my === epoch) strip = f;
         })
         .catch(() => {});
+      api
+        .loupeSrc(it.path)
+        .then((p) => {
+          if (my === epoch) vsrc = api.fileSrc(p);
+        })
+        .catch(() => {
+          if (my === epoch) failed = true;
+        });
+      return;
     }
+    if (it.kind === "other") {
+      curSrc = null;
+      vsrc = null;
+      failed = true;
+      return;
+    }
+    // Image/RAW. Keep the previous photo painted; swap only when the new sharp
+    // preview is DECODED (img.decode), so the swap is a single clean frame. If
+    // the sharp load is slow (cold cache), fall back to the classic blur-up so
+    // the user still gets instant feedback.
+    vsrc = null;
+    let sharpDone = false;
+    const slow = setTimeout(() => {
+      if (my !== epoch || sharpDone) return;
+      loadThumb(it.path, 320).then((s) => {
+        if (my === epoch && !sharpDone && s) {
+          lowSrc = s;
+          showLow = true;
+          curSrc = null; // drop the stale previous photo under the placeholder
+        }
+      });
+    }, SLOW_MS);
     (async () => {
       try {
         const p = await api.loupeSrc(it.path);
-        if (item === it) src = api.fileSrc(p);
+        if (my !== epoch) return;
+        const url = api.fileSrc(p);
+        const img = new Image();
+        img.decoding = "async";
+        img.src = url;
+        try {
+          await img.decode();
+        } catch {
+          /* decode() can reject for valid images — paint anyway */
+        }
+        if (my !== epoch) return;
+        sharpDone = true;
+        curSrc = url;
+        showLow = false;
+        lowSrc = null;
       } catch {
-        if (item === it) failed = true;
+        if (my === epoch) {
+          curSrc = null;
+          failed = true;
+        }
       }
     })();
+    return () => clearTimeout(slow);
   });
 
   function onMeta() {
@@ -200,21 +258,36 @@
   {#if !item}
     <div class="empty">No selection</div>
   {:else if item.kind === "video"}
-    {#if src && !videoErr}
+    {#if videoErr}
+      <div class="empty vfail">
+        <p class="vt">{item.name}</p>
+        <p>This clip can't play in-app — likely HEVC/H.265 the webview can't decode.</p>
+        <button class="obtn" onclick={() => item && api.openExternal(item.path)}>
+          ▶ Open in system player
+        </button>
+      </div>
+    {:else if vsrc}
       <div class="vwrap">
         <!-- svelte-ignore a11y_media_has_caption -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <video
           bind:this={vid}
-          {src}
+          src={vsrc}
           autoplay
           onclick={togglePlay}
           onloadedmetadata={onMeta}
           ontimeupdate={onTime}
           onplay={() => (paused = false)}
           onpause={() => (paused = true)}
-          onerror={() => (videoErr = true)}
+          onerror={() => {
+            // Only a REAL decode/format failure shows the fallback card. An
+            // aborted load (we switched clips mid-load) also fires `error` —
+            // treating that as failure flashed the "can't play HEVC" card for
+            // every clip that was actually about to play fine.
+            const code = vid?.error?.code;
+            if (code && code !== MediaError.MEDIA_ERR_ABORTED) videoErr = true;
+          }}
         ></video>
         <div class="trim">
           <div class="playrow">
@@ -264,37 +337,24 @@
         </div>
       </div>
     {:else}
-      <div class="empty vfail">
-        <p class="vt">{item.name}</p>
-        <p>This clip can't play in-app — likely HEVC/H.265 the webview can't decode.</p>
-        <button class="obtn" onclick={() => item && api.openExternal(item.path)}>
-          ▶ Open in system player
-        </button>
-      </div>
+      <!-- src still resolving (an IPC round-trip) — stay quietly black. The old
+           code showed the HEVC-failure card here, flashing it before EVERY clip. -->
+      <div class="empty"></div>
     {/if}
   {:else if failed}
     <div class="empty">
       Can't preview this file{item.kind === "other" ? " (unsupported format)" : ""}.
     </div>
   {:else}
-    <!-- Blur-up: the cached grid thumb fills the frame (blurred), then the sharp
-         preview cross-fades in on top — same box, no small→big jump. -->
+    <!-- The previous sharp photo stays painted until the next one has decoded,
+         then swaps in a single frame — no fade, no glow, no black gap. The
+         blurred placeholder appears only for genuinely slow (cold) loads. -->
     <div class="stage">
-      {#if lowSrc}
-        <img class="layer ph" class:gone={hiLoaded} src={lowSrc} alt="" draggable="false" />
+      {#if showLow && lowSrc}
+        <img class="layer ph" src={lowSrc} alt="" draggable="false" />
       {/if}
-      {#if src}
-        <img
-          class="layer hi"
-          class:shown={hiLoaded}
-          {src}
-          alt={item.name}
-          draggable="false"
-          onload={() => (hiLoaded = true)}
-        />
-      {/if}
-      {#if !lowSrc && !src}
-        <div class="empty">loading…</div>
+      {#if curSrc}
+        <img class="layer hi" src={curSrc} alt={item.name} draggable="false" />
       {/if}
     </div>
   {/if}
@@ -331,22 +391,12 @@
     height: 100%;
     object-fit: contain;
   }
-  /* low-res placeholder: scaled to fill the frame, softened */
+  /* low-res placeholder for slow loads: softened, edges clipped by the stage.
+     No opacity transitions anywhere — fades between layers were the "glow at
+     the edges" artifact when flipping through warm photos. Swaps are instant. */
   .ph {
     filter: blur(10px);
     transform: scale(1.03); /* mask blurred edges bleeding past the frame */
-    transition: opacity 0.25s ease;
-  }
-  .ph.gone {
-    opacity: 0;
-  }
-  /* sharp preview cross-fades in once it has decoded */
-  .hi {
-    opacity: 0;
-    transition: opacity 0.2s ease;
-  }
-  .hi.shown {
-    opacity: 1;
   }
   .empty {
     color: var(--text-faint);

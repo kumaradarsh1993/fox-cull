@@ -1215,9 +1215,13 @@
 
   .pop { position: absolute; right: 10px; top: 46px; z-index: 30; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 12px; width: 340px; display: flex; flex-direction: column; gap: 10px; }
   .pop .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
-  .pop .row.sub { padding-left: 6px; }
-  .pop .path { color: var(--text-dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pop .hintrow { color: var(--text-faint); font-size: 12px; }
+  .pop .row.sub { padding-left: 6px; flex-wrap: nowrap; }
+  .pop .path { flex: 1; min-width: 0; color: var(--text-dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pop .row.sub .tag { flex: 0 0 auto; }
+  /* Prose row — MUST be block, not flex: flex + space-between turns the text
+     fragments around <code>/<kbd> into separate squeezed flex items and the
+     whole sentence collapses into a one-word-per-line column. */
+  .pop .row.hintrow { display: block; color: var(--text-faint); font-size: 12px; line-height: 1.7; }
   kbd { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; font-size: 11px; }
 
   .body { flex: 1; display: flex; min-height: 0; }

@@ -70,9 +70,50 @@
       if (open && kids && kids.length) fetchCounts(true);
     }
   });
+
+  /** Is `dir` strictly inside `ancestor` (path-boundary-aware, case-insensitive
+   *  for Windows drive letters/folders)? */
+  function isUnder(dir: string, ancestor: string): boolean {
+    const a = ancestor.toLowerCase().replace(/[\\/]+$/, "");
+    const d = dir.toLowerCase();
+    return (
+      d.length > a.length &&
+      d.startsWith(a) &&
+      (d[a.length] === "\\" || d[a.length] === "/")
+    );
+  }
+
+  // Cascade-open to the folder that's actually open: when the current folder
+  // lives under this node, auto-expand it (each child then does the same, so the
+  // chain unfolds down to the selected folder — e.g. restoring the last session).
+  // Done at most once per currentDir value, so manually collapsing an ancestor
+  // afterwards sticks instead of fighting the effect.
+  let autoExpandedFor: string | null = null;
+  $effect(() => {
+    const cd = currentDir;
+    if (!cd || cd === autoExpandedFor) return;
+    if (isUnder(cd, node.path)) {
+      autoExpandedFor = cd;
+      if (!open) {
+        open = true;
+        if (kids === null) loadKids();
+      }
+    }
+  });
+
+  // Keep the selected folder's row visible in the (scrollable) tree pane.
+  let rowEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    if (currentDir === node.path) rowEl?.scrollIntoView({ block: "nearest" });
+  });
 </script>
 
-<div class="trow" class:active={currentDir === node.path} style="padding-left:{4 + depth * 14}px">
+<div
+  class="trow"
+  class:active={currentDir === node.path}
+  style="padding-left:{4 + depth * 14}px"
+  bind:this={rowEl}
+>
   {#if showChevron}
     <button
       class="chev"
