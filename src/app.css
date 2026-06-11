@@ -56,6 +56,36 @@
   --label-purple: #9b6fe0;
 }
 
+/* Warm — for long culling sessions in a dim, warmly-lit room (the night-light
+   case). Chrome drops blue almost entirely: deep amber-browns, candle-toned
+   text, a softer ember accent — nothing in the UI glows colder than the room.
+   The photo stage itself (--viewport-bg) stays a near-black NEUTRAL: a tinted
+   surround would bias how you judge the photos' colors. */
+:root[data-theme="warm"] {
+  --bg: #191007;
+  --bg-panel: #221709;
+  --bg-elev: #2d1f0e;
+  --bg-hover: #3a2a14;
+  --viewport-bg: #0b0a09; /* neutral near-black — color judgment stays honest */
+  --border: #46331b;
+  --text: #f5e3c8;
+  --text-dim: #c8ab82;
+  --text-faint: #8d7452;
+  --accent: #e8923a;
+  --accent-dim: #6e4312;
+  --accent-on: #1d1206;
+  --reject: #d96a4a;
+  --pick: #9eb35c;
+  --star: #e9b54d;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.55);
+
+  --label-red: #d96a4a;
+  --label-green: #9eb35c;
+  --label-yellow: #e9b54d;
+  --label-blue: #7e96b8;
+  --label-purple: #a884c0;
+}
+
 * { box-sizing: border-box; }
 
 html, body {

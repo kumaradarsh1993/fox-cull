@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from "$lib/api";
+  import { activity } from "$lib/activity.svelte";
   import { loadThumb } from "$lib/thumbnail-loader";
   import type { MediaItem, FilmstripInfo } from "$lib/types";
 
@@ -18,6 +19,38 @@
   let videoErr = $state(false);
   let epoch = 0; // bumps on every item change; stale async work checks it
   const SLOW_MS = 180; // how long a sharp load may take before we blur-up
+
+  // ── H.264 proxy playback (clips the webview can't decode) ──
+  let usingProxy = $state(false); // currently playing the converted preview
+  let converting = $state(false);
+  let proxyNote = $state<string | null>(null);
+  // Live transcode progress, fed by the backend's activity events.
+  let proxyPct = $derived.by(() => {
+    const j = item ? activity.jobs[`proxy:${item.path}`] : undefined;
+    return j && j.state === "running" && j.total > 0
+      ? `${Math.round((j.done / j.total) * 100)}%`
+      : "";
+  });
+
+  /** One-time ffmpeg convert to a cached H.264 preview, then play that. */
+  async function convertAndPlay() {
+    if (!item || converting) return;
+    converting = true;
+    proxyNote = null;
+    const my = epoch;
+    try {
+      const p = await api.videoProxy(item.path);
+      if (my === epoch) {
+        usingProxy = true;
+        videoErr = false;
+        vsrc = api.fileSrc(p);
+      }
+    } catch (e) {
+      if (my === epoch) proxyNote = `Couldn't convert this clip (${e})`;
+    } finally {
+      converting = false;
+    }
+  }
 
   // ── video trim state ──
   let vid = $state<HTMLVideoElement | null>(null);
@@ -45,6 +78,9 @@
     const my = ++epoch;
     failed = false;
     videoErr = false;
+    usingProxy = false;
+    converting = false;
+    proxyNote = null;
     paused = false;
     dur = 0;
     cur = 0;
@@ -261,10 +297,18 @@
     {#if videoErr}
       <div class="empty vfail">
         <p class="vt">{item.name}</p>
-        <p>This clip can't play in-app — likely HEVC/H.265 the webview can't decode.</p>
-        <button class="obtn" onclick={() => item && api.openExternal(item.path)}>
-          ▶ Open in system player
+        <p>This clip can't play in-app — likely HEVC/H.265 this machine has no codec for.</p>
+        <button class="obtn" onclick={convertAndPlay} disabled={converting}>
+          {converting ? `⏳ Converting…${proxyPct ? ` ${proxyPct}` : ""}` : "▶ Convert & play here"}
         </button>
+        <p class="subnote">
+          One-time: the bundled ffmpeg makes an H.264 preview, cached on the drive.
+          The original file is never touched.
+        </p>
+        <button class="obtn ghost" onclick={() => item && api.openExternal(item.path)}>
+          Open in system player instead
+        </button>
+        {#if proxyNote}<p class="subnote err">{proxyNote}</p>{/if}
       </div>
     {:else if vsrc}
       <div class="vwrap">
@@ -286,9 +330,29 @@
             // treating that as failure flashed the "can't play HEVC" card for
             // every clip that was actually about to play fine.
             const code = vid?.error?.code;
-            if (code && code !== MediaError.MEDIA_ERR_ABORTED) videoErr = true;
+            if (!code || code === MediaError.MEDIA_ERR_ABORTED) return;
+            // If a converted H.264 preview is already cached for this clip,
+            // switch to it silently instead of asking again.
+            if (item && !usingProxy) {
+              const my = epoch;
+              const p = item.path;
+              api.videoProxyCached(p).then((cached) => {
+                if (my !== epoch) return;
+                if (cached) {
+                  usingProxy = true;
+                  vsrc = api.fileSrc(cached);
+                } else {
+                  videoErr = true;
+                }
+              });
+            } else {
+              videoErr = true;
+            }
           }}
         ></video>
+        {#if usingProxy}
+          <span class="proxytag" title="The original couldn't decode in-app; you're watching the cached H.264 conversion. Trim still cuts the original.">converted preview</span>
+        {/if}
         <div class="trim">
           <div class="playrow">
             <button class="pp" onclick={togglePlay} title={paused ? "Play (Space)" : "Pause (Space)"}>
@@ -367,7 +431,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #0a0805;
+    /* Near-black NEUTRAL in every theme: the Focus surround is the reference
+       your eye judges the photo's colors against, so it never takes the UI
+       theme's tint (the old #0a0805 had a warm cast). */
+    background: #0c0b0a;
     overflow: hidden;
   }
   img,
@@ -575,5 +642,39 @@
   }
   .obtn:hover {
     filter: brightness(1.06);
+  }
+  .obtn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .obtn.ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+  .vfail .subnote {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-faint);
+    line-height: 1.5;
+  }
+  .vfail .subnote.err {
+    color: var(--reject);
+  }
+  .vwrap {
+    position: relative;
+  }
+  .proxytag {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.55);
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 11px;
+    pointer-events: auto;
+    z-index: 5;
   }
 </style>

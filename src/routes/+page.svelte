@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { api } from "$lib/api";
   import { settings } from "$lib/settings.svelte";
+  import { activity } from "$lib/activity.svelte";
   import { resetThumbs, prefetchLoupe, loaderStats } from "$lib/thumbnail-loader";
   import {
     LABELS,
@@ -21,6 +23,7 @@
   import DetailsView from "$lib/components/DetailsView.svelte";
   import ContextMenu, { type MenuEntry } from "$lib/components/ContextMenu.svelte";
   import TrashPanel from "$lib/components/TrashPanel.svelte";
+  import ActivityBar from "$lib/components/ActivityBar.svelte";
 
   type FlagFilter = "all" | "pick" | "reject" | "unflagged";
   type ViewMode = "grid" | "details" | "loupe";
@@ -478,9 +481,12 @@
         const elapsed = performance.now() - t0;
         const remain = (elapsed / prepDone) * (paths.length - prepDone);
         prepEta = remain > 1500 ? `~${Math.ceil(remain / 1000)}s` : "almost done";
+        // Mirror into the global activity chip (visible from any view).
+        activity.local("prepare", "Preparing full-size previews", prepDone, prepTotal);
       }
     } finally {
       preparing = false;
+      activity.end("prepare");
       // Only flash "ready" if we're still on the same folder we prepared.
       if (currentDir === dir) {
         prepared = true;
@@ -624,6 +630,12 @@
       },
       { label: "Clear rating & marks" + sfx, icon: "⟲", action: () => unset() },
       { separator: true },
+      {
+        label: "Export as JPEG…" + sfx,
+        icon: "⇩",
+        disabled: !ts.some((i) => i.kind === "image" || i.kind === "raw"),
+        action: () => exportTargets(),
+      },
       { label: "Copy file path", icon: "⧉", action: () => copyPath(ctx.path) },
     ];
   }
@@ -707,6 +719,48 @@
     window.addEventListener("pointerup", up);
   }
 
+  // ── full-screen mode (F): just the photo, everything else gone ───────────
+  let fullscreen = $state(false);
+  let fsPrevView: ViewMode = "grid";
+  async function toggleFullscreen() {
+    fullscreen = !fullscreen;
+    try {
+      await getCurrentWindow().setFullscreen(fullscreen);
+    } catch {
+      // wayland/odd WMs can refuse — the chrome still hides, which is most of it
+    }
+    if (fullscreen) {
+      fsPrevView = viewMode;
+      if (active) setView("loupe");
+    } else {
+      setView(fsPrevView);
+    }
+  }
+
+  // ── export (RAW → camera-rendered JPEG; images copied through) ───────────
+  async function exportTargets() {
+    const ts = targets().filter((i) => i.kind === "image" || i.kind === "raw");
+    if (!ts.length) {
+      activity.error("export-result", "Nothing to export (photos and RAW only)");
+      return;
+    }
+    const dest = await api.pickFolder();
+    if (!dest) return;
+    try {
+      const r = await api.exportJpegs(ts.map((i) => i.path), dest);
+      if (r.failed.length) {
+        activity.error(
+          "export-result",
+          `Export: ${r.failed.length} of ${ts.length} failed — ${r.errors[0] ?? ""}`,
+        );
+      }
+      // Show the result where the files are: open the destination folder.
+      api.openExternal(r.dest);
+    } catch (e) {
+      activity.error("export-result", `Export failed (${e})`);
+    }
+  }
+
   // ── in-app Trash (per-drive recycle folder) ──────────────────────────────
   async function openTrash() {
     try {
@@ -741,12 +795,14 @@
     if (e.key === "ArrowLeft" || e.key === "ArrowUp") { move(-1); e.preventDefault(); return; }
     if (e.key === "Enter") { setView(viewMode === "loupe" ? "grid" : "loupe"); e.preventDefault(); return; }
     if (e.key === "Escape") {
-      if (dimLevel > 0) dimLevel = 0;
+      if (fullscreen) toggleFullscreen();
+      else if (dimLevel > 0) dimLevel = 0;
       else if (viewMode === "loupe") setView("grid");
       else selected = active ? new Set([active.path]) : new Set();
       return;
     }
     const k = e.key.toLowerCase();
+    if (k === "f") { toggleFullscreen(); return; }
     if (k === "l") { dimLevel = (dimLevel + 1) % 3; return; }
     if (k === "g") { setView("grid"); return; }
     if (k === "d") { setView("details"); return; }
@@ -812,7 +868,7 @@
   </button>
 {/snippet}
 
-<div class="app" data-dim={dimLevel}>
+<div class="app" data-dim={dimLevel} class:fs={fullscreen}>
   <!-- ░ left: drives + folder tree ░ -->
   <aside class="tree" style="width:{settings.s.treeWidth}px">
     <div class="tree-head">
@@ -828,6 +884,7 @@
         <button class="btn sm" onclick={openFolderPicker} title="Jump to a folder">Open…</button>
       </div>
     </div>
+    <ActivityBar />
     <div class="tree-body">
       {#if drives.length}
         {#each drives as d (d.path)}
@@ -993,6 +1050,7 @@
         <div class="row"><span>Theme</span>
           <div class="seg">
             <button class="chip" class:on={settings.s.theme === "dark"} onclick={() => settings.set({ theme: "dark" })}>Dark</button>
+            <button class="chip" class:on={settings.s.theme === "warm"} onclick={() => settings.set({ theme: "warm" })} title="Low-blue amber chrome for long sessions in a dim, warmly-lit room — the photo stage stays neutral">Warm</button>
             <button class="chip" class:on={settings.s.theme === "light"} onclick={() => settings.set({ theme: "light" })}>Light</button>
           </div>
         </div>
@@ -1023,7 +1081,7 @@
             <span class="tag">{libInfo.on_drive ? "on drive" : "app-data (read-only mount)"}</span>
           </div>
         {/if}
-        <div class="row hintrow">Each drive keeps its own catalog, preview cache &amp; recycle in a <code>_FoxCull</code> folder. Press <kbd>L</kbd> dim · <kbd>G</kbd> grid · <kbd>D</kbd> details.</div>
+        <div class="row hintrow">Each drive keeps its own catalog, preview cache &amp; recycle in a <code>_FoxCull</code> folder. Press <kbd>F</kbd> full screen · <kbd>L</kbd> dim · <kbd>G</kbd> grid · <kbd>D</kbd> details.</div>
       </div>
     {/if}
 
@@ -1143,6 +1201,17 @@
 
 <style>
   .app { display: flex; height: 100vh; overflow: hidden; }
+  /* Full-screen mode (F): nothing but the photo stage — every panel, bar and
+     strip disappears and the viewport fills the (OS-fullscreened) window. */
+  .app.fs .tree,
+  .app.fs .vsplit,
+  .app.fs .hsplit,
+  .app.fs .bar,
+  .app.fs .banner,
+  .app.fs .info,
+  .app.fs .bstrip,
+  .app.fs .rstrip,
+  .app.fs .pop { display: none; }
   .tree { display: flex; flex-direction: column; background: var(--bg-panel); border-right: 1px solid var(--border); flex: 0 0 auto; min-width: 0; }
   .tree-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--border); }
   .tree-actions { display: flex; align-items: center; gap: 6px; }

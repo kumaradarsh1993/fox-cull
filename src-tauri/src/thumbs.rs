@@ -47,8 +47,9 @@ fn cache_key(abs: &str, mtime: i64, size: u64, max: u32) -> String {
 }
 
 /// Bake the EXIF orientation into the pixels so the output is always upright —
-/// this is the fix for "portrait phone photos showing up sideways".
-fn apply_orientation(img: DynamicImage, o: u16) -> DynamicImage {
+/// this is the fix for "portrait phone photos showing up sideways". Also used
+/// by the JPEG export (the RAW embedded preview carries no orientation tag).
+pub fn apply_orientation(img: DynamicImage, o: u16) -> DynamicImage {
     match o {
         2 => img.fliph(),
         3 => img.rotate180(),
@@ -84,9 +85,11 @@ fn decode_jpeg_scaled(bytes: &[u8], max: u32) -> Option<DynamicImage> {
 /// Fast path for grid thumbnails: decode ONLY the EXIF-embedded thumbnail that
 /// phones/cameras store in the file header. Reads just the first ~768 KB (not the
 /// whole multi-MB file) and decodes a ~512px image, so this is ~7x less disk I/O
-/// and a near-instant decode. Returns `None` if there's no embedded thumbnail or
-/// it's too small to look crisp at `max` — the caller then full-decodes.
-fn embedded_thumb(path: &Path, max: u32) -> Option<DynamicImage> {
+/// and a near-instant decode. Also returns the file's ICC profile (the APP2
+/// segments sit in the same head bytes) so the cached thumbnail keeps its colors.
+/// Returns `None` if there's no embedded thumbnail or it's too small to look
+/// crisp at `max` — the caller then full-decodes.
+fn embedded_thumb(path: &Path, max: u32) -> Option<(DynamicImage, Option<Vec<u8>>)> {
     use std::io::Read;
     let f = std::fs::File::open(path).ok()?;
     let mut buf = Vec::with_capacity(768 * 1024);
@@ -97,37 +100,121 @@ fn embedded_thumb(path: &Path, max: u32) -> Option<DynamicImage> {
     // otherwise it'd look soft (some cameras embed a tiny 160px thumbnail).
     let long = img.width().max(img.height());
     if long * 4 >= max * 3 {
-        Some(img)
+        let icc = media::icc_from_jpeg(&buf);
+        Some((img, icc))
     } else {
         None
     }
 }
 
-fn load_source(path: &Path, kind: Kind, max: u32) -> Result<DynamicImage, String> {
+/// Decoded source image plus its ICC color profile (when the source carries
+/// one), so re-encoded thumbnails/previews keep wide-gamut colors instead of
+/// silently being reinterpreted as sRGB.
+fn load_source(path: &Path, kind: Kind, max: u32) -> Result<(DynamicImage, Option<Vec<u8>>), String> {
     match kind {
         // RAW: pull the embedded full-res JPEG preview rather than demosaic,
-        // and DCT-scale that preview too.
+        // and DCT-scale that preview too. The profile (sRGB or — if the camera
+        // was set to AdobeRGB — that) rides along in the preview's APP2.
         Kind::Raw => {
             let data = std::fs::read(path).map_err(|e| e.to_string())?;
             let jpg = media::largest_embedded_jpeg(&data)
                 .ok_or_else(|| "no embedded JPEG preview found in RAW file".to_string())?;
+            let icc = media::icc_from_jpeg(jpg);
             if let Some(img) = decode_jpeg_scaled(jpg, max) {
-                return Ok(img);
+                return Ok((img, icc));
             }
-            image::load_from_memory(jpg).map_err(|e| e.to_string())
+            image::load_from_memory(jpg)
+                .map(|i| (i, icc))
+                .map_err(|e| e.to_string())
         }
         _ => {
             // Fast path for the dominant case (95% of the user's library is
             // phone JPEG): read once, DCT-scaled decode from memory.
             if matches!(media::ext_lower(path).as_str(), "jpg" | "jpeg") {
                 if let Ok(bytes) = std::fs::read(path) {
+                    let icc = media::icc_from_jpeg(&bytes);
                     if let Some(img) = decode_jpeg_scaled(&bytes, max) {
-                        return Ok(img);
+                        return Ok((img, icc));
+                    }
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        return Ok((img, icc));
                     }
                 }
             }
-            image::open(path).map_err(|e| e.to_string())
+            image::open(path).map(|i| (i, None)).map_err(|e| e.to_string())
         }
+    }
+}
+
+/// Splice an ICC profile into an existing JPEG file as APP2 `ICC_PROFILE`
+/// segment(s), inserted after any APP0/APP1 headers. The `image` crate's
+/// encoder writes untagged JPEGs, which the webview renders as sRGB — for a
+/// Display P3 / AdobeRGB source that visibly mutes the colors. This puts the
+/// source's profile back so the browser color-manages the preview correctly.
+pub fn embed_icc(out: &Path, icc: &[u8]) -> std::io::Result<()> {
+    const SIG: &[u8] = b"ICC_PROFILE\0";
+    const MAX_DATA: usize = 65533 - SIG.len() - 2; // segment length field max minus headers
+    let data = std::fs::read(out)?;
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return Ok(()); // not a JPEG we understand — leave it untouched
+    }
+    // Insert after the APP0/APP1 run (JFIF/EXIF first, per convention).
+    let mut pos = 2usize;
+    while pos + 4 <= data.len()
+        && data[pos] == 0xFF
+        && (data[pos + 1] == 0xE0 || data[pos + 1] == 0xE1)
+    {
+        let len = ((data[pos + 2] as usize) << 8) | data[pos + 3] as usize;
+        if len < 2 || pos + 2 + len > data.len() {
+            return Ok(());
+        }
+        pos += 2 + len;
+    }
+    let chunks: Vec<&[u8]> = icc.chunks(MAX_DATA).collect();
+    let count = chunks.len().min(255) as u8;
+    let mut seg = Vec::with_capacity(icc.len() + 32 * chunks.len());
+    for (idx, chunk) in chunks.iter().enumerate().take(255) {
+        let len = 2 + SIG.len() + 2 + chunk.len();
+        seg.push(0xFF);
+        seg.push(0xE2);
+        seg.push((len >> 8) as u8);
+        seg.push((len & 0xFF) as u8);
+        seg.extend_from_slice(SIG);
+        seg.push(idx as u8 + 1);
+        seg.push(count);
+        seg.extend_from_slice(chunk);
+    }
+    let mut rebuilt = Vec::with_capacity(data.len() + seg.len());
+    rebuilt.extend_from_slice(&data[..pos]);
+    rebuilt.extend_from_slice(&seg);
+    rebuilt.extend_from_slice(&data[pos..]);
+    std::fs::write(out, rebuilt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round-trip: encode a JPEG, splice a profile in, read it back out, and
+    /// confirm the image still decodes.
+    #[test]
+    fn icc_embed_roundtrip() {
+        let dir = std::env::temp_dir().join("foxcull-icc-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("t.jpg");
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            8,
+            image::Rgb([200, 90, 30]),
+        ));
+        img.save(&out).unwrap();
+        let profile: Vec<u8> = (0u8..255).cycle().take(200_000).collect(); // forces multi-chunk
+        embed_icc(&out, &profile).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        let got = crate::media::icc_from_jpeg(&bytes).expect("profile back out");
+        assert_eq!(got, profile);
+        image::load_from_memory(&bytes).expect("JPEG still decodes after splice");
+        let _ = std::fs::remove_file(&out);
     }
 }
 
@@ -147,6 +234,15 @@ pub fn ensure(cache_dir: &Path, path: &Path, kind: Kind, max: u32) -> Result<Pat
     if out.exists() {
         return Ok(out);
     }
+    // HEIC/HEIF: the webview and the `image` crate can't decode these — hand
+    // the whole job (decode + container rotation + scale + JPEG encode) to the
+    // bundled ffmpeg. ICC is not carried over (ffmpeg writes an untagged JPEG).
+    if matches!(media::ext_lower(path).as_str(), "heic" | "heif") {
+        let ff = crate::video::ffmpeg_path()
+            .ok_or_else(|| "HEIC preview needs the bundled ffmpeg".to_string())?;
+        crate::video::decode_still(&ff, path, &out, max)?;
+        return Ok(out);
+    }
     // Only now — for a thumbnail we actually have to build — do we open the
     // original to read its EXIF orientation (so it gets baked into the pixels).
     let o = media::orientation(path);
@@ -157,7 +253,7 @@ pub fn ensure(cache_dir: &Path, path: &Path, kind: Kind, max: u32) -> Result<Pat
     let t0 = Instant::now();
     // Grid-sized JPEG thumbnails: try the embedded-thumbnail fast path first.
     let mut source = "full";
-    let img = if max <= 512
+    let (img, icc) = if max <= 512
         && matches!(kind, Kind::Image)
         && matches!(media::ext_lower(path).as_str(), "jpg" | "jpeg")
     {
@@ -181,6 +277,11 @@ pub fn ensure(cache_dir: &Path, path: &Path, kind: Kind, max: u32) -> Result<Pat
     // JPEG has no alpha channel; flatten to RGB before encoding.
     let rgb = DynamicImage::ImageRgb8(img.to_rgb8());
     rgb.save(&out).map_err(|e| e.to_string())?;
+    // Re-attach the source's color profile (wide-gamut phone shots / AdobeRGB
+    // camera previews) so the cached JPEG renders with the right colors.
+    if let Some(icc) = icc {
+        let _ = embed_icc(&out, &icc);
+    }
     crate::log::line(&format!(
         "THUMB-GEN {} {}x{} max={} src={} decode={}ms resize+enc={}ms",
         name,

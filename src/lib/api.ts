@@ -7,6 +7,7 @@ import type {
   TrashItem,
   LibraryInfo,
   FilmstripInfo,
+  ExportOutcome,
 } from "./types";
 
 export const api = {
@@ -38,6 +39,14 @@ export const api = {
   /** Real capture timestamps (EXIF/creation_time), cached; for sort + grouping. */
   captureDates: (dir: string, paths: string[]) =>
     invoke<{ path: string; captured: number }[]>("capture_dates", { dir, paths }),
+  /** Convert a clip the webview can't decode into a cached H.264 preview. */
+  videoProxy: (path: string) => invoke<string>("video_proxy", { path }),
+  /** Path of an already-built H.264 proxy for the clip, or null. */
+  videoProxyCached: (path: string) =>
+    invoke<string | null>("video_proxy_cached", { path }).catch(() => null),
+  /** Export files into `dest`: RAW → camera-rendered JPEG, images copied. */
+  exportJpegs: (paths: string[], dest: string) =>
+    invoke<ExportOutcome>("export_jpegs", { paths, dest }),
   getTrim: (path: string) => invoke<[number, number] | null>("get_trim", { path }),
   setTrim: (path: string, inS: number, outS: number) =>
     invoke<void>("set_trim", { path, in_s: inS, out_s: outS }).catch(() => {}),

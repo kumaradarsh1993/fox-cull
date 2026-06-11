@@ -59,6 +59,16 @@ export interface FilmstripInfo {
   duration: number;
 }
 
+/** Result of a JPEG export run (RAW → camera-rendered JPEG; images copied). */
+export interface ExportOutcome {
+  exported: number;
+  copied: number;
+  skipped: number;
+  failed: string[];
+  errors: string[];
+  dest: string;
+}
+
 export interface Filter {
   minRating: number;
   label: string | null;

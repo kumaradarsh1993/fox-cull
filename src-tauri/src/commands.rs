@@ -7,7 +7,7 @@ use std::time::{Instant, UNIX_EPOCH};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::catalog::Catalog;
 use crate::media::{self, Kind};
@@ -144,6 +144,36 @@ fn resolve_library(data_root: &Path, root: &Path) -> Library {
         dir,
         on_drive,
     }
+}
+
+// ── background-activity reporting (the Lightroom-style top-left indicator) ───
+//
+// Every long-running backend job emits `activity` events the frontend folds
+// into one progress chip + expandable list, so "why is the disk busy / what is
+// still loading" is always answerable at a glance. `total == 0` means
+// indeterminate (a spinner, no percentage).
+
+#[derive(Clone, Serialize)]
+pub struct Activity {
+    pub id: String,
+    pub label: String,
+    pub done: u64,
+    pub total: u64,
+    /// "running" | "done" | "error"
+    pub state: String,
+}
+
+fn emit_activity(app: &AppHandle, id: &str, label: &str, done: u64, total: u64, state: &str) {
+    let _ = app.emit(
+        "activity",
+        Activity {
+            id: id.to_string(),
+            label: label.to_string(),
+            done,
+            total,
+            state: state.to_string(),
+        },
+    );
 }
 
 /// Seconds since the Unix epoch.
@@ -721,6 +751,7 @@ pub struct FilmstripInfo {
 /// seek bar with no hover preview.
 #[tauri::command]
 pub async fn video_filmstrip(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> Result<FilmstripInfo, String> {
@@ -728,7 +759,18 @@ pub async fn video_filmstrip(
     let ffmpeg = state.ffmpeg.clone();
     let src = PathBuf::from(&path);
     tauri::async_runtime::spawn_blocking(move || {
-        video::ensure_filmstrip(&cache_dir, ffmpeg.as_deref(), &src).map(|(sprite, fs)| {
+        // First open of a clip extracts ~dozens of frames — can take a few
+        // seconds on long footage, so show an indeterminate activity entry.
+        let cached = video::filmstrip_path(&cache_dir, &src).exists();
+        let act_id = format!("strip:{}", src.to_string_lossy());
+        if !cached {
+            emit_activity(&app, &act_id, "Building video scrub strip", 0, 0, "running");
+        }
+        let res = video::ensure_filmstrip(&cache_dir, ffmpeg.as_deref(), &src);
+        if !cached {
+            emit_activity(&app, &act_id, "Building video scrub strip", 1, 1, "done");
+        }
+        res.map(|(sprite, fs)| {
             FilmstripInfo {
                 src: sprite.to_string_lossy().to_string(),
                 cols: fs.cols,
@@ -763,6 +805,7 @@ const WARM_CAP: usize = 600;
 /// reads only happen for the handful of RAW/video cells actually on screen.
 #[tauri::command]
 pub async fn warm_thumbnails(
+    app: AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
     max: u32,
@@ -786,6 +829,14 @@ pub async fn warm_thumbnails(
         max,
         my_gen
     ));
+    // Surface big warming passes in the activity indicator. Small batches (the
+    // chunked "Prepare folder" calls report their own combined progress) stay
+    // quiet to avoid a churn of micro-jobs.
+    let announce = total >= 24;
+    let act_id = format!("warm:{my_gen}");
+    if announce {
+        emit_activity(&app, &act_id, "Rendering thumbnails", 0, total as u64, "running");
+    }
     let done = tauri::async_runtime::spawn_blocking(move || {
         let count = std::sync::atomic::AtomicUsize::new(0);
         // Run on the small dedicated pool so we never monopolize the cores the
@@ -797,10 +848,24 @@ pub async fn warm_thumbnails(
                     return;
                 }
                 if thumbs::ensure(&cache_dir, p, Kind::Image, max).is_ok() {
-                    count.fetch_add(1, Ordering::Relaxed);
+                    let n = count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if announce && n % 16 == 0 {
+                        emit_activity(
+                            &app,
+                            &act_id,
+                            "Rendering thumbnails",
+                            n as u64,
+                            total as u64,
+                            "running",
+                        );
+                    }
                 }
             });
         });
+        if announce {
+            let n = count.load(Ordering::Relaxed) as u64;
+            emit_activity(&app, &act_id, "Rendering thumbnails", n, total as u64, "done");
+        }
         count.load(Ordering::Relaxed)
     })
     .await
@@ -844,6 +909,7 @@ pub struct CaptureDate {
 /// USB SSD or starves the foreground.
 #[tauri::command]
 pub async fn capture_dates(
+    app: AppHandle,
     state: State<'_, AppState>,
     catalog: State<'_, Catalog>,
     dir: String,
@@ -896,9 +962,18 @@ pub async fn capture_dates(
     }
 
     if !pending.is_empty() {
+        // First pass on a folder reads EXIF / probes clips for every file —
+        // exactly the kind of invisible disk work the activity chip is for.
+        let announce = pending.len() >= 24;
+        let act_id = format!("captures:{}", prefix);
+        let act_total = pending.len() as u64;
+        if announce {
+            emit_activity(&app, &act_id, "Reading capture dates", 0, act_total, "running");
+        }
         let extracted: Vec<(CaptureDate, (String, i64, i64, i64))> =
             tauri::async_runtime::spawn_blocking(move || {
-                warm_pool().install(|| {
+                let counter = std::sync::atomic::AtomicUsize::new(0);
+                let res = warm_pool().install(|| {
                     pending
                         .par_iter()
                         .map(|pd| {
@@ -911,6 +986,17 @@ pub async fn capture_dates(
                                 Kind::Other => None,
                             }
                             .unwrap_or(pd.mtime);
+                            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                            if announce && n % 16 == 0 {
+                                emit_activity(
+                                    &app,
+                                    &act_id,
+                                    "Reading capture dates",
+                                    n as u64,
+                                    act_total,
+                                    "running",
+                                );
+                            }
                             (
                                 CaptureDate {
                                     path: pd.path.clone(),
@@ -920,7 +1006,11 @@ pub async fn capture_dates(
                             )
                         })
                         .collect()
-                })
+                });
+                if announce {
+                    emit_activity(&app, &act_id, "Reading capture dates", act_total, act_total, "done");
+                }
+                res
             })
             .await
             .map_err(|e| e.to_string())?;
@@ -1108,6 +1198,207 @@ pub async fn trim_video(
     .map_err(|e| e.to_string())?
 }
 
+/// Already-built H.264 proxy for a clip, if one is cached — lets the player
+/// fall back to it instantly on a decode failure without asking the user again.
+#[tauri::command]
+pub fn video_proxy_cached(state: State<'_, AppState>, path: String) -> Option<String> {
+    let cache_dir = state.cache_dir.lock().clone();
+    let p = video::proxy_path(&cache_dir, Path::new(&path));
+    p.exists().then(|| p.to_string_lossy().to_string())
+}
+
+/// Convert a clip the webview can't decode (HEVC without the OS codec) into a
+/// cached H.264 preview via the bundled ffmpeg, reporting progress through the
+/// activity indicator. One transcode runs at a time; the result is cached on
+/// the drive so it's converted once, ever, per clip.
+#[tauri::command]
+pub async fn video_proxy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<String, String> {
+    let cache_dir = state.cache_dir.lock().clone();
+    let ffmpeg = state.ffmpeg.clone();
+    let src = PathBuf::from(&path);
+    let name = src
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "clip".into());
+    let id = format!("proxy:{path}");
+    let label = format!("Converting {name} for playback");
+    tauri::async_runtime::spawn_blocking(move || {
+        emit_activity(&app, &id, &label, 0, 100, "running");
+        let mut last = 0u64;
+        let res = video::ensure_proxy(&cache_dir, ffmpeg.as_deref(), &src, |frac| {
+            let pct = (frac * 100.0) as u64;
+            if pct != last {
+                last = pct;
+                emit_activity(&app, &id, &label, pct, 100, "running");
+            }
+        });
+        match &res {
+            Ok(_) => emit_activity(&app, &id, &label, 100, 100, "done"),
+            Err(e) => emit_activity(&app, &id, e, 0, 100, "error"),
+        }
+        res.map(|p| p.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ── JPEG export (the RAW backlog path: keep a small JPEG, cull the 25 MB NEF) ─
+
+#[derive(Serialize)]
+pub struct ExportOutcome {
+    /// RAW files exported via their embedded camera-rendered JPEG.
+    pub exported: usize,
+    /// Ordinary images copied through unchanged.
+    pub copied: usize,
+    /// Videos / unsupported files left out.
+    pub skipped: usize,
+    pub failed: Vec<String>,
+    pub errors: Vec<String>,
+    pub dest: String,
+}
+
+/// Export `paths` into `dest` as viewable files. RAW (NEF etc.) becomes a JPEG
+/// built from the **camera's own embedded full-resolution rendering** — the
+/// same white balance / Picture Control the camera baked, NOT a washed-out
+/// linear raw decode — extracted byte-for-byte (no re-encode) when the shot is
+/// upright, or rotated once at quality 92 when it isn't. Ordinary images are
+/// copied verbatim (keeping their EXIF/ICC). Each output's file time is set to
+/// the capture date so exports sort correctly anywhere. Sequential on purpose:
+/// one reader is the fastest way through a spinning disk.
+#[tauri::command]
+pub async fn export_jpegs(
+    app: AppHandle,
+    paths: Vec<String>,
+    dest: String,
+) -> Result<ExportOutcome, String> {
+    let dest_dir = PathBuf::from(&dest);
+    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let total = paths.len() as u64;
+        let label = format!("Exporting {total} file{}", if total == 1 { "" } else { "s" });
+        emit_activity(&app, "export", &label, 0, total, "running");
+        let mut out = ExportOutcome {
+            exported: 0,
+            copied: 0,
+            skipped: 0,
+            failed: Vec::new(),
+            errors: Vec::new(),
+            dest: dest_dir.to_string_lossy().to_string(),
+        };
+        for (i, p) in paths.iter().enumerate() {
+            let src = Path::new(p);
+            let r = match media::classify(src) {
+                Kind::Raw => export_raw_as_jpeg(src, &dest_dir).map(|_| out.exported += 1),
+                Kind::Image => copy_preserving(src, &dest_dir).map(|_| out.copied += 1),
+                _ => {
+                    out.skipped += 1;
+                    Ok(())
+                }
+            };
+            if let Err(e) = r {
+                out.failed.push(p.clone());
+                out.errors.push(e);
+            }
+            emit_activity(&app, "export", &label, i as u64 + 1, total, "running");
+        }
+        emit_activity(&app, "export", &label, total, total, "done");
+        crate::log::line(&format!(
+            "EXPORT dest={:?} exported={} copied={} skipped={} failed={}",
+            dest_dir.file_name().unwrap_or_default(),
+            out.exported,
+            out.copied,
+            out.skipped,
+            out.failed.len()
+        ));
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Non-colliding `<dest>/<stem>.<ext>` for an export.
+fn export_target(dest: &Path, src: &Path, force_ext: Option<&str>) -> PathBuf {
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".into());
+    let ext = force_ext
+        .map(|e| e.to_string())
+        .or_else(|| src.extension().map(|e| e.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "jpg".into());
+    uniquify(dest.join(format!("{stem}.{ext}")))
+}
+
+/// Stamp `out`'s modified time with the shot's capture date (EXIF), falling
+/// back to the source file's own mtime — so exports sort chronologically in
+/// any file manager instead of clumping at "just now".
+fn stamp_capture_time(src: &Path, out: &Path) {
+    let ts = media::capture_date(src).or_else(|| {
+        std::fs::metadata(src)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+    });
+    if let Some(ts) = ts {
+        let _ = filetime::set_file_mtime(out, filetime::FileTime::from_unix_time(ts, 0));
+    }
+}
+
+/// RAW → JPEG: extract the largest embedded JPEG (the camera's processed
+/// full-res preview). Upright shots are written byte-for-byte (zero quality
+/// loss vs. what the camera rendered); rotated shots are decoded, oriented and
+/// re-encoded once at quality 92 so they don't come out sideways (the embedded
+/// preview carries no orientation tag of its own).
+fn export_raw_as_jpeg(src: &Path, dest: &Path) -> Result<(), String> {
+    let data = std::fs::read(src).map_err(|e| e.to_string())?;
+    let jpg = media::largest_embedded_jpeg(&data)
+        .ok_or_else(|| "no embedded JPEG preview in this RAW file".to_string())?;
+    // Sanity: a real preview, not a postage-stamp thumbnail.
+    let (w, h) =
+        image::ImageReader::with_format(std::io::Cursor::new(jpg), image::ImageFormat::Jpeg)
+            .into_dimensions()
+            .map_err(|e| format!("embedded preview unreadable: {e}"))?;
+    if w.max(h) < 1024 {
+        return Err(format!(
+            "embedded preview too small ({w}x{h}) — this RAW needs a real converter"
+        ));
+    }
+    let o = media::orientation(src);
+    let out = export_target(dest, src, Some("jpg"));
+    if o == 1 {
+        std::fs::write(&out, jpg).map_err(|e| e.to_string())?;
+    } else {
+        let img = image::load_from_memory(jpg).map_err(|e| e.to_string())?;
+        let img = thumbs::apply_orientation(img, o);
+        let icc = media::icc_from_jpeg(jpg);
+        let f = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            std::io::BufWriter::new(f),
+            92,
+        );
+        enc.encode_image(&image::DynamicImage::ImageRgb8(img.to_rgb8()))
+            .map_err(|e| e.to_string())?;
+        if let Some(icc) = icc {
+            let _ = thumbs::embed_icc(&out, &icc);
+        }
+    }
+    stamp_capture_time(src, &out);
+    Ok(())
+}
+
+/// Plain image export: byte-for-byte copy (keeps EXIF/ICC), capture-dated.
+fn copy_preserving(src: &Path, dest: &Path) -> Result<(), String> {
+    let out = export_target(dest, src, None);
+    std::fs::copy(src, &out).map_err(|e| e.to_string())?;
+    stamp_capture_time(src, &out);
+    Ok(())
+}
+
 /// Absolute paths of every file currently flagged `reject`, across the whole
 /// catalog — the input to the delete sweep.
 #[tauri::command]
@@ -1140,6 +1431,8 @@ fn cache_files_for(cache_dir: &Path, src: &str) -> Vec<PathBuf> {
     let strip = video::filmstrip_path(cache_dir, p);
     out.push(strip.with_extension("json"));
     out.push(strip);
+    // H.264 playback proxy (HEVC-without-codec machines) — can be sizable.
+    out.push(video::proxy_path(cache_dir, p));
     out
 }
 

@@ -159,6 +159,129 @@ pub fn trim(
     }
 }
 
+/// Decode a still image file (e.g. HEIC, which neither the webview nor the
+/// `image` crate can read) into a JPEG at `out`, scaled to fit a `max` box.
+/// ffmpeg's HEIF demuxer applies the container's rotation (irot/imir), so the
+/// output is upright without us reading EXIF.
+pub fn decode_still(ffmpeg: &Path, src: &Path, out: &Path, max: u32) -> Result<(), String> {
+    let vf = format!("scale=w={max}:h={max}:force_original_aspect_ratio=decrease");
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-v", "error", "-i"])
+        .arg(src)
+        .args(["-frames:v", "1", "-vf", &vf, "-q:v", "3", "-y"])
+        .arg(out)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let status = cmd.status().map_err(|e| e.to_string())?;
+    if status.success() && out.exists() {
+        Ok(())
+    } else {
+        Err("ffmpeg could not decode this image".into())
+    }
+}
+
+// ── H.264 proxy playback (HEVC clips on machines without the OS codec) ───────
+//
+// The webview plays video through the OS media stack (Media Foundation on
+// Windows), so we can't bundle a codec INTO the player — but the bundled ffmpeg
+// decodes HEVC fine. When a clip genuinely fails to play, we transcode a capped
+// H.264 preview once, cache it beside the thumbnails on the drive, and play
+// that. One transcode at a time (a second concurrent one would just thrash the
+// disk and halve both).
+
+/// Cache path for a clip's H.264 proxy, keyed like the poster but prefixed `p`.
+pub fn proxy_path(cache_dir: &Path, src: &Path) -> PathBuf {
+    let (mtime, size) = meta(src);
+    let abs = src.to_string_lossy();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    abs.hash(&mut h);
+    mtime.hash(&mut h);
+    size.hash(&mut h);
+    cache_dir.join(format!("p{:016x}.mp4", h.finish()))
+}
+
+static PROXY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Transcode `src` to a capped (≤1920 long edge) H.264/AAC preview at `out`,
+/// reporting progress (0.0..=1.0) via `on_progress`. Writes to a `.part` file
+/// and renames on success so a crash never leaves a half-written proxy that
+/// would later "play" as truncated. Serialized process-wide.
+pub fn ensure_proxy(
+    cache_dir: &Path,
+    ffmpeg: Option<&Path>,
+    src: &Path,
+    mut on_progress: impl FnMut(f64),
+) -> Result<PathBuf, String> {
+    let out = proxy_path(cache_dir, src);
+    if out.exists() {
+        return Ok(out);
+    }
+    let ff = ffmpeg.ok_or("ffmpeg not available")?;
+    let _guard = PROXY_LOCK.lock().map_err(|_| "proxy lock poisoned")?;
+    if out.exists() {
+        return Ok(out); // built while we waited for the lock
+    }
+    let dur = probe_duration(ff, src).unwrap_or(0.0);
+    let part = out.with_extension("part.mp4");
+    let _ = std::fs::remove_file(&part);
+
+    let mut cmd = Command::new(ff);
+    cmd.args(["-v", "error", "-i"])
+        .arg(src)
+        .args([
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-vf",
+            "scale=w=1920:h=1920:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            "-progress", "pipe:1", "-nostats",
+            "-y",
+        ])
+        .arg(&part)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    if let Some(stdout) = child.stdout.take() {
+        use std::io::BufRead;
+        // ffmpeg's -progress stream is `key=value` lines; out_time_us tracks the
+        // encoded position, which against the probed duration gives a fraction.
+        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            if dur > 0.0 {
+                if let Some(v) = line.strip_prefix("out_time_us=") {
+                    if let Ok(us) = v.trim().parse::<f64>() {
+                        on_progress((us / 1_000_000.0 / dur).clamp(0.0, 1.0));
+                    }
+                }
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() && part.exists() {
+        std::fs::rename(&part, &out).map_err(|e| e.to_string())?;
+        on_progress(1.0);
+        Ok(out)
+    } else {
+        let _ = std::fs::remove_file(&part);
+        Err("ffmpeg could not convert this clip (the build may lack an H.264 encoder)".into())
+    }
+}
+
 /// Ensure a poster exists for `src`; returns its cache path. `ffmpeg=None` (not
 /// bundled / dev) yields an error so the UI shows the film placeholder.
 pub fn ensure_poster(cache_dir: &Path, ffmpeg: Option<&Path>, src: &Path) -> Result<PathBuf, String> {

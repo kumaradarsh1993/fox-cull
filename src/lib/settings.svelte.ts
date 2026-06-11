@@ -3,7 +3,7 @@
 // loads once and writes through to tauri-plugin-store on every change.
 import { Store } from "@tauri-apps/plugin-store";
 
-export type Theme = "light" | "dark";
+export type Theme = "light" | "dark" | "warm";
 export type ViewMode = "grid" | "details" | "loupe";
 export type FilmstripPos = "bottom" | "right" | "hidden";
 export type SortBy = "name" | "date" | "capture" | "type" | "size";

@@ -36,7 +36,11 @@ pub fn ext_lower(path: &Path) -> String {
 
 pub fn classify(path: &Path) -> Kind {
     match ext_lower(path).as_str() {
-        "jpg" | "jpeg" | "png" | "webp" | "bmp" | "tif" | "tiff" | "gif" => Kind::Image,
+        // heic/heif decode via the bundled ffmpeg (the webview and the `image`
+        // crate can't read them), but to the rest of the app they're images.
+        "jpg" | "jpeg" | "png" | "webp" | "bmp" | "tif" | "tiff" | "gif" | "heic" | "heif" => {
+            Kind::Image
+        }
         "nef" | "dng" | "cr2" | "cr3" | "arw" | "raf" | "rw2" | "orf" | "srw" | "pef" => Kind::Raw,
         "mp4" | "mov" | "m4v" | "avi" | "mkv" | "webm" | "3gp" => Kind::Video,
         _ => Kind::Other,
@@ -167,6 +171,50 @@ pub fn embedded_thumbnail_jpeg(data: &[u8]) -> Option<&[u8]> {
         i += 1;
     }
     None
+}
+
+/// Extract the embedded ICC color profile from a JPEG byte stream (the APP2
+/// `ICC_PROFILE` segments, reassembled in sequence order). Phone photos shot in
+/// wide gamut (Display P3) and cameras set to AdobeRGB carry one; without it a
+/// re-encoded thumbnail is interpreted as sRGB and looks washed out / shifted.
+/// Returns `None` for untagged (effectively sRGB) files.
+pub fn icc_from_jpeg(data: &[u8]) -> Option<Vec<u8>> {
+    const SIG: &[u8] = b"ICC_PROFILE\0";
+    let mut chunks: Vec<(u8, &[u8])> = Vec::new();
+    let mut i = 2usize; // past SOI
+    while i + 4 <= data.len() {
+        if data[i] != 0xFF {
+            break; // not a marker — malformed or we ran into entropy data
+        }
+        let marker = data[i + 1];
+        // Standalone markers (no length): skip. SOS = start of entropy data: stop.
+        if marker == 0xDA || marker == 0xD9 {
+            break;
+        }
+        if (0xD0..=0xD8).contains(&marker) || marker == 0x01 {
+            i += 2;
+            continue;
+        }
+        let len = ((data[i + 2] as usize) << 8) | data[i + 3] as usize;
+        if len < 2 || i + 2 + len > data.len() {
+            break;
+        }
+        let payload = &data[i + 4..i + 2 + len];
+        if marker == 0xE2 && payload.len() > SIG.len() + 2 && payload.starts_with(SIG) {
+            let seq = payload[SIG.len()];
+            chunks.push((seq, &payload[SIG.len() + 2..]));
+        }
+        i += 2 + len;
+    }
+    if chunks.is_empty() {
+        return None;
+    }
+    chunks.sort_by_key(|(seq, _)| *seq);
+    let mut icc = Vec::with_capacity(chunks.iter().map(|(_, c)| c.len()).sum());
+    for (_, c) in chunks {
+        icc.extend_from_slice(c);
+    }
+    Some(icc)
 }
 
 /// Index just past the `FFD9` end-of-image marker, searching from `start`.
