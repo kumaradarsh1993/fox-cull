@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>fox-cull - fast photo and video culling for Windows, macOS, and Linux</title>
+  <meta name="description" content="fox-cull is a free, open-source desktop app for fast photo and video culling. Rate, pick, reject, tag, trim, and sweep rejects without importing or touching originals." />
+  <meta name="robots" content="index,follow,max-image-preview:large" />
+  <link rel="canonical" href="https://kumaradarsh1993.github.io/fox-cull/" />
+  <meta property="og:title" content="fox-cull - fast photo and video culling" />
+  <meta property="og:description" content="Lightroom-style first-pass photo and video culling without the subscription." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://kumaradarsh1993.github.io/fox-cull/" />
+  <meta property="og:image" content="https://kumaradarsh1993.github.io/fox-cull/images/fox-cull-icon.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" href="images/fox-cull-icon.png" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "fox-cull",
+    "applicationCategory": "MultimediaApplication",
+    "operatingSystem": "Windows, macOS, Linux",
+    "description": "Fast, lightweight photo and video culling app for rating, tagging, rejecting, and sweeping large shoots.",
+    "softwareVersion": "0.3.0",
+    "license": "https://github.com/kumaradarsh1993/fox-cull/blob/main/LICENSE",
+    "codeRepository": "https://github.com/kumaradarsh1993/fox-cull",
+    "downloadUrl": "https://github.com/kumaradarsh1993/fox-cull/releases",
+    "author": { "@type": "Person", "name": "Kumar Adarsh" }
+  }
+  </script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f8f4;
+      --ink: #152019;
+      --muted: #5e6b62;
+      --line: #d6ded7;
+      --panel: #ffffff;
+      --panel-2: #edf4ef;
+      --accent: #1f8a70;
+      --accent-2: #d94d3f;
+      --accent-3: #2469a6;
+      --gold: #b88516;
+      --shadow: 0 24px 70px rgba(20, 31, 24, 0.18);
+      --max: 1160px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+      letter-spacing: 0;
+    }
+    a { color: inherit; text-decoration: none; }
+    button, input { font: inherit; }
+    .nav {
+      position: fixed;
+      inset: 0 0 auto 0;
+      z-index: 20;
+      background: rgba(246, 248, 244, 0.82);
+      border-bottom: 1px solid rgba(21, 32, 25, 0.1);
+      backdrop-filter: blur(16px);
+    }
+    .nav-inner {
+      max-width: var(--max);
+      margin: 0 auto;
+      min-height: 64px;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+    }
+    .brand img { width: 34px; height: 34px; border-radius: 8px; }
+    .links { display: flex; gap: 18px; align-items: center; color: var(--muted); font-size: 14px; }
+    .links a:hover { color: var(--ink); }
+    .links .repo {
+      color: #fff;
+      background: var(--ink);
+      border-radius: 999px;
+      padding: 9px 14px;
+    }
+    .hero {
+      min-height: 100vh;
+      padding: 104px 24px 54px;
+      position: relative;
+      overflow: hidden;
+      display: grid;
+      align-items: center;
+    }
+    .hero::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(246, 248, 244, 0.97) 0%, rgba(246, 248, 244, 0.82) 42%, rgba(246, 248, 244, 0.2) 100%),
+        repeating-linear-gradient(90deg, rgba(21, 32, 25, 0.06) 0 1px, transparent 1px 84px),
+        repeating-linear-gradient(0deg, rgba(21, 32, 25, 0.05) 0 1px, transparent 1px 84px);
+      pointer-events: none;
+    }
+    .hero-inner {
+      width: min(100%, var(--max));
+      margin: 0 auto;
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(300px, 510px) 1fr;
+      gap: 34px;
+      align-items: center;
+    }
+    .hero-copy { position: relative; z-index: 2; }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 0 12px;
+      border: 1px solid rgba(31, 138, 112, 0.32);
+      border-radius: 999px;
+      background: rgba(31, 138, 112, 0.1);
+      color: #116850;
+      font-weight: 750;
+      font-size: 13px;
+    }
+    h1 {
+      margin: 20px 0 18px;
+      font-size: 64px;
+      line-height: 0.98;
+      letter-spacing: 0;
+      max-width: 10ch;
+    }
+    .lede {
+      margin: 0;
+      max-width: 540px;
+      color: var(--muted);
+      font-size: 19px;
+    }
+    .cta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 46px;
+      padding: 0 17px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink);
+      font-weight: 750;
+    }
+    .button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .button:hover { transform: translateY(-1px); }
+    .search-phrase {
+      margin-top: 18px;
+      color: #6d786f;
+      font-size: 13px;
+    }
+    .demo {
+      position: relative;
+      z-index: 1;
+      min-height: 610px;
+      border: 1px solid rgba(21, 32, 25, 0.14);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .demo-top {
+      height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--line);
+      background: #fdfdfb;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .demo-body {
+      display: grid;
+      grid-template-columns: 160px 1fr 210px;
+      min-height: 564px;
+    }
+    .folder-list, .inspector {
+      background: var(--panel-2);
+      padding: 14px;
+      border-right: 1px solid var(--line);
+    }
+    .inspector { border-right: 0; border-left: 1px solid var(--line); }
+    .folder {
+      padding: 8px 9px;
+      border-radius: 7px;
+      color: var(--muted);
+      font-size: 13px;
+      cursor: default;
+    }
+    .folder.active { background: #fff; color: var(--ink); font-weight: 800; }
+    .workspace { padding: 14px; background: #fbfcfa; }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .tool {
+      border: 1px solid var(--line);
+      background: #fff;
+      min-height: 34px;
+      padding: 0 11px;
+      border-radius: 7px;
+      color: var(--ink);
+      font-weight: 750;
+      cursor: pointer;
+    }
+    .tool:hover, .tool.active { border-color: var(--accent); color: var(--accent); }
+    .tool.reject.active { border-color: var(--accent-2); color: var(--accent-2); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 9px;
+    }
+    .thumb {
+      position: relative;
+      aspect-ratio: 1 / 0.78;
+      border-radius: 8px;
+      border: 2px solid transparent;
+      overflow: hidden;
+      cursor: pointer;
+      background: #d8e2d9;
+    }
+    .thumb.active { border-color: var(--accent); }
+    .thumb.rejected { filter: grayscale(0.72); opacity: 0.58; }
+    .thumb::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: var(--photo);
+    }
+    .thumb::after {
+      content: attr(data-meta);
+      position: absolute;
+      left: 7px;
+      bottom: 7px;
+      background: rgba(0, 0, 0, 0.62);
+      color: #fff;
+      border-radius: 999px;
+      padding: 3px 7px;
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .focus {
+      min-height: 170px;
+      border-radius: 8px;
+      background: var(--focus);
+      border: 1px solid var(--line);
+      margin-bottom: 14px;
+      position: relative;
+      overflow: hidden;
+    }
+    .focus::after {
+      content: "";
+      position: absolute;
+      inset: auto 0 0 0;
+      height: 45%;
+      background: linear-gradient(transparent, rgba(0, 0, 0, 0.48));
+    }
+    .metric {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .metric strong { color: var(--ink); }
+    .rating-row { display: flex; gap: 6px; margin-top: 14px; }
+    .rate {
+      width: 32px;
+      height: 32px;
+      border-radius: 7px;
+      border: 1px solid var(--line);
+      background: #fff;
+      cursor: pointer;
+      font-weight: 800;
+      color: var(--gold);
+    }
+    .rate.active { background: #fff6dc; border-color: var(--gold); }
+    .section {
+      max-width: var(--max);
+      margin: 0 auto;
+      padding: 82px 24px;
+    }
+    h2 { margin: 0 0 22px; font-size: 36px; line-height: 1.08; letter-spacing: 0; }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 22px;
+    }
+    .card h3 { margin: 0 0 8px; font-size: 18px; }
+    .card p { margin: 0; color: var(--muted); }
+    .download {
+      background: #152019;
+      color: #fff;
+    }
+    .download .section { padding-top: 70px; padding-bottom: 70px; }
+    .download p { color: #c6d2c9; max-width: 720px; }
+    .download .button { border-color: rgba(255,255,255,0.2); }
+    footer {
+      padding: 26px 24px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    @media (max-width: 980px) {
+      .hero-inner { grid-template-columns: 1fr; }
+      h1 { font-size: 46px; max-width: 12ch; }
+      .demo { min-height: auto; }
+      .demo-body { grid-template-columns: 1fr; }
+      .folder-list, .inspector { display: none; }
+      .cards { grid-template-columns: 1fr; }
+      .links a:not(.repo) { display: none; }
+    }
+    @media (max-width: 620px) {
+      .hero { padding-top: 92px; }
+      h1 { font-size: 39px; }
+      .lede { font-size: 17px; }
+      .grid { grid-template-columns: repeat(2, 1fr); }
+      .demo-top { align-items: flex-start; height: auto; padding: 12px; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="#top" aria-label="fox-cull home">
+        <img src="images/fox-cull-icon.png" alt="" />
+        <span>fox-cull</span>
+      </a>
+      <nav class="links" aria-label="Primary">
+        <a href="#workflow">Workflow</a>
+        <a href="#privacy">Privacy</a>
+        <a href="#download">Download</a>
+        <a class="repo" href="https://github.com/kumaradarsh1993/fox-cull">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-inner">
+        <div class="hero-copy">
+          <span class="eyebrow">Open-source photo and video culling</span>
+          <h1 id="hero-title">Cull the shoot before the edit.</h1>
+          <p class="lede">fox-cull gives photographers a fast first-pass desk: browse folders in place, rate, pick, reject, tag, preview video, and sweep rejects without importing originals.</p>
+          <div class="cta">
+            <a class="button primary" href="https://github.com/kumaradarsh1993/fox-cull/releases">Download releases</a>
+            <a class="button" href="https://github.com/kumaradarsh1993/fox-cull">View source</a>
+          </div>
+          <p class="search-phrase">A Lightroom-style photo culling app for Windows, macOS, and Linux.</p>
+        </div>
+
+        <div class="demo" aria-label="Interactive fox-cull review board">
+          <div class="demo-top">
+            <strong>Wedding preview - 1842 files</strong>
+            <span id="demo-status">12 picked, 3 rejected, 41 tagged</span>
+          </div>
+          <div class="demo-body">
+            <aside class="folder-list" aria-label="Folders">
+              <div class="folder">Camera Roll</div>
+              <div class="folder active">Reception</div>
+              <div class="folder">Portraits</div>
+              <div class="folder">Video clips</div>
+              <div class="folder">Exports</div>
+            </aside>
+            <div class="workspace">
+              <div class="toolbar" aria-label="Culling controls">
+                <button class="tool active" type="button" data-action="pick">Pick</button>
+                <button class="tool reject" type="button" data-action="reject">Reject</button>
+                <button class="tool" type="button" data-action="label">Color label</button>
+                <button class="tool" type="button" data-action="next">Next</button>
+              </div>
+              <div class="grid" id="thumb-grid" aria-label="Photo thumbnails"></div>
+            </div>
+            <aside class="inspector" aria-label="Selected item">
+              <div class="focus" id="focus-photo"></div>
+              <div class="metric"><span>Selected</span><strong id="selected-name">DSC_1042.NEF</strong></div>
+              <div class="metric"><span>Status</span><strong id="selected-status">Picked</strong></div>
+              <div class="metric"><span>Tag</span><strong id="selected-tag">reception</strong></div>
+              <div class="rating-row" aria-label="Rate selected photo">
+                <button class="rate" type="button" data-rate="1">1</button>
+                <button class="rate" type="button" data-rate="2">2</button>
+                <button class="rate active" type="button" data-rate="3">3</button>
+                <button class="rate" type="button" data-rate="4">4</button>
+                <button class="rate" type="button" data-rate="5">5</button>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="workflow">
+      <h2>Built for the first pass.</h2>
+      <div class="cards">
+        <article class="card">
+          <h3>Folder-first browsing</h3>
+          <p>Point fox-cull at a drive or shoot folder and review files where they already live. No catalog import step.</p>
+        </article>
+        <article class="card">
+          <h3>Fast keyboard triage</h3>
+          <p>Rate with number keys, pick with P, reject with X, clear with U, then filter and sweep when you are ready.</p>
+        </article>
+        <article class="card">
+          <h3>Video-aware culling</h3>
+          <p>Clips get poster frames, scrub previews, playback, and lossless trim/export for quick delivery cuts.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="privacy">
+      <h2>Your originals stay untouched.</h2>
+      <div class="cards">
+        <article class="card">
+          <h3>No destructive edits</h3>
+          <p>Ratings and labels live in fox-cull's catalog. Original photo and video files are not modified.</p>
+        </article>
+        <article class="card">
+          <h3>Portable catalogs</h3>
+          <p>Per-drive storage keeps catalog, previews, and recycle data with the drive, including external SSD workflows.</p>
+        </article>
+        <article class="card">
+          <h3>Local desktop app</h3>
+          <p>Tauri, Rust, and Svelte keep the app lightweight. No subscription and no cloud library.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="download" id="download">
+      <div class="section">
+        <h2>Download fox-cull.</h2>
+        <p>Installers are published from GitHub releases for Windows, macOS, and Linux. The project is open-source under MIT.</p>
+        <div class="cta">
+          <a class="button primary" href="https://github.com/kumaradarsh1993/fox-cull/releases">Open releases</a>
+          <a class="button" href="https://github.com/kumaradarsh1993/fox-cull#readme">Read the README</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>fox-cull by Kumar Adarsh</span>
+  </footer>
+
+  <script>
+    const photos = [
+      { name: "DSC_1042.NEF", tag: "reception", rating: 3, status: "Picked", photo: "linear-gradient(145deg, #114d56 0 30%, #e6bb64 30% 52%, #f4e6cc 52% 70%, #17292d 70% 100%)" },
+      { name: "DSC_1043.NEF", tag: "portrait", rating: 4, status: "Picked", photo: "linear-gradient(135deg, #27323d 0 22%, #8fb0a5 22% 45%, #f5d0a1 45% 62%, #513b33 62% 100%)" },
+      { name: "DSC_1044.NEF", tag: "reject", rating: 1, status: "Rejected", photo: "linear-gradient(160deg, #1b1b21 0 35%, #69747b 35% 56%, #d1d1c7 56% 70%, #232323 70% 100%)" },
+      { name: "DSC_1045.NEF", tag: "details", rating: 5, status: "Picked", photo: "linear-gradient(150deg, #104f3b 0 28%, #f4efe2 28% 48%, #c89942 48% 60%, #27412f 60% 100%)" },
+      { name: "VID_0104.MP4", tag: "video", rating: 3, status: "Picked", photo: "linear-gradient(135deg, #0f2530 0 25%, #2f6a86 25% 55%, #f7d88e 55% 72%, #0b1015 72% 100%)" },
+      { name: "DSC_1047.NEF", tag: "maybe", rating: 2, status: "Maybe", photo: "linear-gradient(140deg, #292f22 0 34%, #87a35f 34% 50%, #f4d4b0 50% 66%, #6a2e29 66% 100%)" },
+      { name: "DSC_1048.NEF", tag: "family", rating: 4, status: "Picked", photo: "linear-gradient(120deg, #0b2038 0 24%, #407ca0 24% 48%, #f3e4c3 48% 64%, #1c2b22 64% 100%)" },
+      { name: "DSC_1049.NEF", tag: "reject", rating: 1, status: "Rejected", photo: "linear-gradient(160deg, #4a4a4a 0 30%, #9d9d9d 30% 52%, #e0dccf 52% 67%, #202020 67% 100%)" },
+      { name: "DSC_1050.NEF", tag: "album", rating: 5, status: "Picked", photo: "linear-gradient(135deg, #14251c 0 25%, #e08c51 25% 45%, #f6d59d 45% 63%, #713229 63% 100%)" }
+    ];
+    let selected = 0;
+    const grid = document.querySelector("#thumb-grid");
+    const focus = document.querySelector("#focus-photo");
+    const nameEl = document.querySelector("#selected-name");
+    const statusEl = document.querySelector("#selected-status");
+    const tagEl = document.querySelector("#selected-tag");
+    const statusLine = document.querySelector("#demo-status");
+    const rateButtons = [...document.querySelectorAll(".rate")];
+
+    function render() {
+      grid.innerHTML = photos.map((photo, index) => {
+        const classes = ["thumb", index === selected ? "active" : "", photo.status === "Rejected" ? "rejected" : ""].join(" ");
+        return `<button type="button" class="${classes}" style="--photo:${photo.photo}" data-index="${index}" data-meta="${photo.rating} star"></button>`;
+      }).join("");
+      const photo = photos[selected];
+      focus.style.setProperty("--focus", photo.photo);
+      nameEl.textContent = photo.name;
+      statusEl.textContent = photo.status;
+      tagEl.textContent = photo.tag;
+      rateButtons.forEach((button) => button.classList.toggle("active", Number(button.dataset.rate) === photo.rating));
+      const picked = photos.filter((item) => item.status === "Picked").length;
+      const rejected = photos.filter((item) => item.status === "Rejected").length;
+      statusLine.textContent = `${picked} picked, ${rejected} rejected, ${photos.length} loaded`;
+    }
+
+    grid.addEventListener("click", (event) => {
+      const thumb = event.target.closest(".thumb");
+      if (!thumb) return;
+      selected = Number(thumb.dataset.index);
+      render();
+    });
+    document.querySelector(".toolbar").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-action]");
+      if (!button) return;
+      const action = button.dataset.action;
+      if (action === "next") selected = (selected + 1) % photos.length;
+      if (action === "pick") photos[selected].status = "Picked";
+      if (action === "reject") photos[selected].status = "Rejected";
+      if (action === "label") photos[selected].tag = photos[selected].tag === "album" ? "review" : "album";
+      document.querySelectorAll(".tool").forEach((item) => item.classList.toggle("active", item === button && action !== "next"));
+      render();
+    });
+    document.querySelector(".rating-row").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-rate]");
+      if (!button) return;
+      photos[selected].rating = Number(button.dataset.rate);
+      render();
+    });
+    render();
+  </script>
+</body>
+</html>

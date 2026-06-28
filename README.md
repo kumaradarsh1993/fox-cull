@@ -4,6 +4,8 @@
 Sort through thousands of photos quickly — keep the good ones, reject the rest —
 without a subscription, without the bloat.
 
+Website: https://kumaradarsh1993.github.io/fox-cull/
+
 fox-cull is built for the part of photography nobody enjoys: the first pass
 through a huge pile of shots from your phone and camera, deciding what's worth
 keeping. It borrows the workflow you already know from Lightroom — a folder
