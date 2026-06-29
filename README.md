@@ -6,6 +6,16 @@ without a subscription, without the bloat.
 
 Website: https://kumaradarsh1993.github.io/fox-cull/
 
+Stable downloads:
+
+| Platform | Download |
+|---|---|
+| Windows | [fox-cull setup.exe](https://github.com/kumaradarsh1993/fox-cull/releases/download/v0.3.0/fox-cull_0.3.0_x64-setup.exe) |
+| macOS (Apple Silicon) | [fox-cull.dmg](https://github.com/kumaradarsh1993/fox-cull/releases/download/v0.3.0/fox-cull_0.3.0_aarch64.dmg) |
+| Linux | [fox-cull AppImage](https://github.com/kumaradarsh1993/fox-cull/releases/download/v0.3.0/fox-cull_0.3.0_amd64.AppImage) |
+
+[Beta builds and older releases](https://github.com/kumaradarsh1993/fox-cull/releases)
+
 fox-cull is built for the part of photography nobody enjoys: the first pass
 through a huge pile of shots from your phone and camera, deciding what's worth
 keeping. It borrows the workflow you already know from Lightroom — a folder
